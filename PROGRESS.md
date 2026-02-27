@@ -5,6 +5,30 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-09] Reward/loss pipeline design complete
+**Date:** 2026-02-27
+
+The role of the loss/reward signal in FAYN is now fully specified: the framework
+uses a loss or reward scalar to *modulate* weight updates — what it eliminates is
+backpropagation, not supervision.
+
+Decisions made (full rationale in `docs/DESIGN.md` §2.31–2.38):
+- **Signal forms**: per-sample, per-batch, delayed RL, and multiple parallel named signals are all supported. `RewardEvent` carries the scalar through the EventBus.
+- **Update rules**: all four paradigms are in scope — reward-modulated Hebbian, perturbation, evolutionary selection, and contrastive Hebbian.
+- **Loss functions**: cross-entropy, MSE, accuracy/ranking, environment reward, and custom callables via `LossFn = std::function<float(output, target)>`.
+- **Signal routing**: layers can operate in Local (pure Hebbian, no reward), Global (reward-scaled Hebbian), or Hierarchical (eligibility trace) mode.
+- **Update timing**: asynchronous / event-driven — all weight updates are side effects of EventBus subscribers, never called directly in the training loop.
+- **Temporal credit (RL)**: eligibility traces (`e[t] = λ·e[t-1] + pre·post`; `ΔW = lr·r·e`).
+- **Readout**: last graph node (sink), trained with the same rules as all other layers.
+- **Transport**: `RewardEvent` for internal subscribers + `run_epoch()` return value for the CLI runner.
+
+**What is now possible:** The learning paradigm can be designed at a level of
+abstraction above individual kernels. An experiment only needs to emit a
+`RewardEvent` after each batch; the choice of Hebbian vs. perturbation vs.
+evolutionary update is a subscriber configuration, not a code change.
+
+---
+
 ## [CP-08] Smoke test suite: all 8 tests pass on Linux/WSL
 **Date:** 2026-02-27
 

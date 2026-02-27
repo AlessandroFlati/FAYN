@@ -1,7 +1,8 @@
 # FAYN — Framework Design Document
 
 **Created:** 2026-02-27 05:59 UTC
-**Status:** Initial scaffold complete. First experiment pending.
+**Updated:** 2026-02-27 09:46 UTC
+**Status:** Reward/loss pipeline design complete. First experiment pending.
 
 ---
 
@@ -83,9 +84,12 @@ explicit state-passing mechanism is a near-term TODO.
 - Classification benchmarks (MNIST, CIFAR-10)
 
 **Implication:** The `Experiment` base class accepts any `DataSource` and reports
-a generic scalar metric per epoch. The framework never assumes cross-entropy or
-any specific loss function exists. The `RewardEvent` on the `EventBus` carries the
-RL signal; `EpochEvent` carries the classification metric.
+a generic scalar metric per epoch. A loss or reward function **is** required —
+what FAYN eliminates is *backpropagation*, not the supervising signal. The loss
+value modulates weight updates directly (reward-modulated Hebbian, perturbation
+acceptance, evolutionary fitness) rather than being differentiated. The
+`RewardEvent` on the `EventBus` carries the scalar signal; `EpochEvent` carries
+the epoch-level metric for display.
 
 ---
 
@@ -505,6 +509,170 @@ RTX 5090. CI can be added when the framework stabilises.
 
 ---
 
+---
+
+## 2.3x Reward / Loss Pipeline (design interview 2026-02-27 09:46 UTC)
+
+The following questions and answers define how FAYN uses a reward or loss signal
+to drive weight updates without backpropagation.
+
+---
+
+### 2.31 Signal form
+
+**Q:** What does the reward/loss signal look like at runtime?
+
+**A:** All four forms are supported — they are not mutually exclusive:
+- **Scalar per sample** — per-example loss or reward before batching
+- **Scalar per batch** — loss averaged over a mini-batch (e.g. cross-entropy)
+- **Delayed scalar (RL)** — environment reward arriving after an action, not tied to a single forward pass
+- **Multiple signals in parallel** — e.g. task loss + intrinsic novelty reward simultaneously
+
+**Implication:** `RewardEvent` carries a named scalar (`std::string name; float value`)
+so multiple signals can be emitted in the same step. Subscribers filter by name.
+The experiment is responsible for computing and emitting each signal.
+
+---
+
+### 2.32 Update rules
+
+**Q:** How does the reward/loss signal modulate weight updates?
+
+**A:** All four update paradigms are in scope:
+- **Reward-modulated Hebbian** — `ΔW ∝ r × pre × post`. The scalar reward gates the Hebbian correlation: positive reward reinforces co-firing, negative reward suppresses it.
+- **Perturbation / node perturbation** — add noise to weights or activations; keep the perturbation if it improves the loss. No gradient required.
+- **Evolutionary selection** — evaluate a population of weight variants; propagate the best-performing ones. Loss is a fitness score, not a gradient source.
+- **Contrastive Hebbian** — run two forward passes (free phase vs. clamped/target phase); update weights based on the difference in activity between phases (cf. Contrastive Hebbian Learning, Equilibrium Propagation).
+
+**Implication:** Each paradigm is an independent module:
+- Reward-modulated Hebbian: `hebbian_update()` already exists; gains a `reward` scalar argument.
+- Perturbation: `PerturbationUpdater` class (planned) applies noise and evaluates.
+- Evolutionary: `Population` class (planned) holds N cloned graphs, runs them in parallel on separate CUDA streams, and selects survivors.
+- Contrastive: a second forward pass with clamped output; the difference in `last_output_` between phases drives the update.
+
+No single update rule is privileged in the `Layer` or `Graph` API. All rules are
+external to the graph and operate on cached activations or cloned weight tensors.
+
+---
+
+### 2.33 Loss function
+
+**Q:** How is the loss/reward scalar computed from the network output?
+
+**A:** All four options are supported:
+- **Standard supervised loss** — cross-entropy, MSE, hinge, etc., computed from network output vs. ground-truth labels. The scalar value modulates updates; it is never differentiated.
+- **Accuracy / ranking signal** — binary or ordinal feedback (+1 / −1 / 0); used when a smooth loss is undesirable.
+- **Environment reward (RL)** — external scalar from a Gym-style environment.
+- **Custom / task-specific** — user-defined `std::function<float(const Tensor&, const Tensor&)>` registered per experiment.
+
+**Implication:** A `LossFn = std::function<float(const Tensor& output, const Tensor& target)>`
+type alias lives in `src/core/loss.hpp`. Standard implementations (cross_entropy,
+mse, accuracy) are provided. The experiment passes its chosen `LossFn` to the
+training loop; the framework never calls a loss function internally.
+
+---
+
+### 2.34 Signal routing
+
+**Q:** Does every layer receive the same reward signal, or is it layer-specific?
+
+**A:** Both **layer-local** and **hierarchical / propagated** routing are in scope.
+They are not mutually exclusive — different layers in the same experiment can use
+different routing strategies:
+
+- **Layer-local only** — each layer sees only its own pre/post activations. No global signal. Classic Hebbian / Oja's rule. Used for unsupervised feature extraction in earlier layers.
+- **Hierarchical / propagated** — the global reward is transformed layer-by-layer into a local teaching signal without backprop. One mechanism: a layer's *contribution to the output* is estimated from its cached activations and used to scale its local Hebbian update. Another: eligibility traces (see §2.36) naturally localise credit to recently co-firing synapses.
+
+**Implication:** `DenseLayer` will expose a `set_reward_routing(RoutingMode)` flag:
+- `RoutingMode::Local` — pure Hebbian, no reward signal consumed.
+- `RoutingMode::Global` — layer subscribes to `RewardEvent` and scales its Hebbian update by the received reward.
+- `RoutingMode::Hierarchical` — layer uses an eligibility trace; reward is applied when the trace is non-zero.
+
+---
+
+### 2.35 Update timing
+
+**Q:** When does the weight update happen relative to the forward pass?
+
+**A:** **Asynchronous / event-driven.** Updates are triggered by the `MutationEngine`
+or a custom subscriber when a threshold condition is satisfied — decoupled from
+the forward pass cadence. The subscriber accumulates activations and reward signals
+internally and applies a weight update when its own criterion is met (e.g. every
+N steps, or when the reward crosses a threshold).
+
+**Implication:** The training loop in `Experiment::run_epoch()` only calls
+`graph.forward()` and emits `RewardEvent`. It does not call `hebbian_update()` or
+any other update function directly. All weight updates are side effects of
+`EventBus` subscribers. This makes it trivial to swap update frequency without
+touching the experiment code.
+
+---
+
+### 2.36 Temporal credit assignment (RL)
+
+**Q:** How is temporal credit assignment handled for delayed rewards?
+
+**A:** **Eligibility traces.** Each synapse maintains a decaying trace of recent
+pre × post activity:
+```
+e[t] = λ × e[t-1] + pre[t] × post[t]
+```
+When the reward `r` arrives (possibly several steps later):
+```
+ΔW = lr × r × e
+```
+The trace naturally assigns more credit to recently co-firing synapses.
+
+**Implication:** `EligibilityTrace` (planned, `src/ops/eligibility_trace.hpp`)
+holds a device tensor `e` of the same shape as the weight matrix, updated on each
+forward pass. `DenseLayer` allocates a trace when `RoutingMode::Hierarchical` is
+set. On `RewardEvent`, the subscriber applies `ΔW = lr × r × e` and decays `e`.
+The decay factor `λ` is a per-layer hyperparameter.
+
+---
+
+### 2.37 Readout layer
+
+**Q:** Where does the readout layer live?
+
+**A:** The **last graph node**, trained with the same reward-modulated rules as all
+other layers. No separate fixed or differently-trained readout.
+
+**Implication:** No special `ReadoutLayer` class. The final `DenseLayer` (or
+`ActivationLayer`) in the graph is the output node by convention — `Graph::forward()`
+returns tensors from all sink nodes (nodes with no active outgoing edges). The
+experiment computes the loss from those output tensors.
+
+---
+
+### 2.38 Signal transport
+
+**Q:** How should the reward/loss value be carried through the system?
+
+**A:** **Both channels simultaneously:**
+- `RewardEvent` on the `EventBus` — for internal subscribers (Hebbian updater, MutationEngine, Logger, eligibility trace manager).
+- Return value from `run_epoch()` — the epoch-level metric returned to the CLI runner for display and external logging.
+
+**Implication:** The standard pattern in every experiment:
+```cpp
+float run_epoch(size_t epoch) override {
+    float total_loss = 0.f;
+    for (auto& [x, y] : loader_) {
+        auto outputs = graph_.forward({{0, x}});
+        float loss   = loss_fn_(outputs[0], y);
+        total_loss  += loss;
+
+        RewardEvent ev;
+        ev.step   = step_++;
+        ev.reward = -loss;          // reward = negative loss
+        EventBus::instance().emit(ev);
+    }
+    return total_loss / loader_.size();
+}
+```
+
+---
+
 ## 3. System Architecture Diagram
 
 ```
@@ -548,8 +716,21 @@ RTX 5090. CI can be added when the framework stabilises.
 
  Stats flow:
    Layer::forward() → CUDA kernel → activations on device
-   (TODO: stats reduction kernel) → StatsSnapshot (FP32, host)
+   → stats reduction kernel → StatsSnapshot (FP32, host)
    → ActivationEvent → EmaVector updates in MutationEngine
+
+ Reward flow:
+   Experiment::run_epoch()
+     → graph.forward() → output tensor
+     → loss_fn(output, target) → scalar loss
+     → RewardEvent{reward = -loss}  ──────────────────────────────┐
+                                                                   │
+   EventBus subscribers reacting to RewardEvent:                  │
+     sync  ──► HеbbianUpdater: ΔW = lr × reward × pre × post  ◄──┘
+     sync  ──► EligibilityTraceManager: ΔW = lr × reward × e
+     sync  ──► PerturbationUpdater: accept/reject noise step
+     async ──► Logger (JSONL)
+   return total_loss → CLI runner display
 ```
 
 ---
@@ -576,8 +757,14 @@ for device.hpp).
 
 | Item | Status | Notes |
 |---|---|---|
-| Stats reduction kernel | TODO | ActivationEvent currently emits empty StatsSnapshot |
-| Population class | TODO | Evolutionary experiments need `src/topology/population.hpp` |
+| `src/core/loss.hpp` | TODO | `LossFn` type alias + cross_entropy, mse, accuracy implementations |
+| Reward-modulated `hebbian_update()` | TODO | Add `float reward` argument; scale delta by reward |
+| `EligibilityTrace` | TODO | `src/ops/eligibility_trace.hpp`; per-synapse decaying trace tensor |
+| `DenseLayer::RoutingMode` | TODO | Local / Global / Hierarchical routing flag |
+| `HеbbianUpdater` subscriber | TODO | EventBus subscriber that owns the update loop |
+| `PerturbationUpdater` | TODO | Apply noise, evaluate loss, accept/reject |
+| Contrastive Hebbian support | TODO | Two-phase forward pass API in `Graph` or `Experiment` |
+| `Population` class | TODO | `src/topology/population.hpp`; N cloned graphs, fitness vector, selection |
 | CSV data loader | TODO | `src/io/csv_loader.hpp` |
 | Recurrent graph support | TODO | Graph::forward() requires a DAG; need unrolling or state injection API |
 | Multi-input merge | TODO | Graph::forward() throws for nodes with >1 active in-edge |
@@ -585,7 +772,6 @@ for device.hpp).
 | Mutual information kernel | TODO | Stats: full MI is O(N²); needs opt-in activation |
 | Pairwise correlation kernel | TODO | Same O(N²) concern; opt-in |
 | First concrete experiment | TODO | HebbianMnistExperiment as integration test |
-| DenseLayer GEMM validation | TODO | Unit test with batch=1, small in/out vs CPU reference |
 | ConvLayer | TODO | Not yet scaffolded |
 | SparseLayer | TODO | Not yet scaffolded |
 | RecurrentLayer | TODO | Not yet scaffolded |

@@ -182,14 +182,88 @@ FAYN/
 
 ---
 
+## Reward / Loss Pipeline
+
+FAYN uses a loss or reward signal — what it eliminates is *backpropagation*, not supervision.
+The scalar is used to modulate weight updates directly.
+
+### Signal forms (all supported)
+- Per-sample scalar, per-batch scalar, delayed RL scalar, multiple named signals in parallel
+- `RewardEvent { std::string name; float value; size_t step; }` on EventBus
+- Also returned from `run_epoch()` as the epoch metric for the CLI runner
+
+### Update rules (all in scope)
+| Rule | Mechanism | Status |
+|---|---|---|
+| Reward-modulated Hebbian | `ΔW ∝ r × pre × post` — reward scales the correlation | `hebbian_update()` exists; reward arg pending |
+| Perturbation | Add noise; keep if loss improves | `PerturbationUpdater` planned |
+| Evolutionary | Population fitness-based selection; `Population` class | planned |
+| Contrastive Hebbian | Free phase vs. clamped phase; update from activity difference | planned |
+
+### Loss functions (`src/core/loss.hpp`, planned)
+`LossFn = std::function<float(const Tensor& output, const Tensor& target)>`
+Standard implementations: `cross_entropy`, `mse`, `accuracy`. Custom callables registered per experiment.
+
+### Signal routing per layer
+- `RoutingMode::Local` — pure Hebbian, no reward consumed (unsupervised, earlier layers)
+- `RoutingMode::Global` — layer subscribes to `RewardEvent`, scales Hebbian update by reward
+- `RoutingMode::Hierarchical` — eligibility trace; reward applied when trace is non-zero
+
+### Eligibility traces (RL credit assignment)
+```
+e[t] = λ × e[t-1] + pre[t] × post[t]
+ΔW   = lr × r × e          (applied on RewardEvent)
+```
+`EligibilityTrace` planned in `src/ops/eligibility_trace.hpp`. λ is a per-layer hyperparameter.
+
+### Readout
+The last graph node (sink node) is the output by convention. No special readout class.
+`Graph::forward()` returns tensors from all nodes with no active outgoing edges.
+
+### Standard training loop pattern
+```cpp
+float run_epoch(size_t epoch) override {
+    float total_loss = 0.f;
+    for (auto& [x, y] : loader_) {
+        auto outputs = graph_.forward({{0, x}});
+        float loss   = loss_fn_(outputs[0], y);
+        total_loss  += loss;
+        RewardEvent ev; ev.step = step_++; ev.reward = -loss;
+        EventBus::instance().emit(ev);
+    }
+    return total_loss / loader_.size();
+}
+```
+All weight updates are side effects of EventBus subscribers — never called directly in the loop.
+
+---
+
 ## Pending Work (see also PROGRESS.md)
 
-- `Population` class for evolutionary experiments (`src/topology/population.hpp`)
+Reward/loss pipeline:
+- `src/core/loss.hpp` — `LossFn` type alias + `cross_entropy`, `mse`, `accuracy`
+- Reward argument for `hebbian_update()` — scale delta by reward scalar
+- `HеbbianUpdater` — EventBus subscriber owning the reward-modulated update loop
+- `EligibilityTrace` — `src/ops/eligibility_trace.hpp`; per-synapse decaying trace tensor
+- `DenseLayer::RoutingMode` — Local / Global / Hierarchical flag
+- `PerturbationUpdater` — apply noise, evaluate loss, accept/reject
+- Contrastive Hebbian two-phase forward pass API
+
+Topology / evolution:
+- `Population` class (`src/topology/population.hpp`) — N cloned graphs, fitness vector, selection
+
+Data / IO:
 - CSV data loader (`src/io/csv_loader.hpp`)
 - Custom binary serialization / `GraphSerializer` (`src/io/`)
+
+Graph:
 - Multi-input merge strategy in `Graph::forward()` (currently throws for >1 in-edge)
+
+Ops:
 - `ConvLayer`, `SparseLayer`, `RecurrentLayer` scaffolding
 - Mutual information / pairwise correlation kernels (opt-in, O(N²))
-- wandb exporter as an `EventBus` subscriber
+
+Experiments / tooling:
 - Run `HebbianMnistExperiment` end-to-end on real MNIST data
+- wandb exporter as an `EventBus` subscriber
 - CI pipeline (deferred until framework stabilises)
