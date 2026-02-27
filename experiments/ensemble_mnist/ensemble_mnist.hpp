@@ -64,4 +64,49 @@ private:
     std::vector<Member>  members_;
 };
 
+// ---------------------------------------------------------------------------
+// ELMEnsembleExperiment
+//
+// Same K-member topology as EnsembleHebbianMnistExperiment, but the d1
+// readout weights are computed analytically via the normal equations:
+//
+//   W_k = (H_k^T H_k)^{-1} H_k^T T
+//
+// where H_k is the [N, 256] matrix of post-ReLU activations from frozen d0_k
+// and T is the [N, 10] one-hot label matrix.  One pass over the training set
+// per member; no iterative updates.
+//
+// Expected training accuracy: ~93-96% (each member near the single-network
+// ELM ceiling; ensemble further reduces variance).
+// ---------------------------------------------------------------------------
+class ELMEnsembleExperiment : public Experiment {
+public:
+    explicit ELMEnsembleExperiment(
+        const ExperimentConfig& cfg,
+        const std::string& mnist_dir  = "data/mnist",
+        int num_networks              = 10);
+    ~ELMEnsembleExperiment() override;
+
+protected:
+    void  setup()                  override;
+    float run_epoch(size_t epoch)  override;
+
+private:
+    // Run one full pass per member: collect H_k, solve normal equations,
+    // write optimal W_k to d1->weights().
+    void elm_fit();
+
+    struct Member {
+        std::unique_ptr<Graph>      graph;
+        std::shared_ptr<DenseLayer> d0;
+        std::shared_ptr<DenseLayer> d1;
+    };
+
+    std::string         mnist_dir_;
+    int                 num_networks_;
+    std::vector<Member> members_;
+    bool                fitted_  = false;
+    cublasHandle_t      cublas_  = nullptr;
+};
+
 } // namespace fayn

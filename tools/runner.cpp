@@ -16,6 +16,7 @@
 
 FAYN_REGISTER_EXPERIMENT("hebbian_mnist",  fayn::HebbianMnistExperiment,         hebbian_mnist)
 FAYN_REGISTER_EXPERIMENT("ensemble_mnist", fayn::EnsembleHebbianMnistExperiment, ensemble_mnist)
+FAYN_REGISTER_EXPERIMENT("elm_ensemble",   fayn::ELMEnsembleExperiment,          elm_ensemble)
 
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog << " <experiment_name> [options]\n"

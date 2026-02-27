@@ -7,6 +7,8 @@
 #include <cuda_runtime.h>
 #include <fmt/core.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
@@ -177,6 +179,253 @@ float EnsembleHebbianMnistExperiment::run_epoch(size_t epoch) {
 
     std::cout << fmt::format("epoch {:3d}  acc={:.4f}\n", epoch, epoch_acc);
     return epoch_acc;
+}
+
+// ---------------------------------------------------------------------------
+// Gaussian elimination with partial pivoting.
+// A: [n, n] row-major FP32 — modified in-place (LU factored).
+// b: [n, C] row-major FP32 — overwritten with solution W_solve.
+// Throws if A is (near-)singular.
+// ---------------------------------------------------------------------------
+static void gauss_solve(std::vector<float>& A, std::vector<float>& b, int n, int C) {
+    for (int k = 0; k < n; ++k) {
+        // Partial pivot: find row with largest |A[i, k]| for i >= k.
+        int pivot = k;
+        for (int i = k + 1; i < n; ++i)
+            if (std::abs(A[i * n + k]) > std::abs(A[pivot * n + k]))
+                pivot = i;
+        if (std::abs(A[pivot * n + k]) < 1e-8f)
+            throw std::runtime_error("elm_fit: H^T H is singular (degenerate features)");
+        // Swap rows k and pivot in A and b.
+        for (int j = 0; j < n; ++j) std::swap(A[k * n + j], A[pivot * n + j]);
+        for (int j = 0; j < C; ++j) std::swap(b[k * C + j], b[pivot * C + j]);
+        // Eliminate column k below the diagonal.
+        float inv = 1.f / A[k * n + k];
+        for (int i = k + 1; i < n; ++i) {
+            float f = A[i * n + k] * inv;
+            for (int j = k; j < n; ++j) A[i * n + j] -= f * A[k * n + j];
+            for (int j = 0; j < C; ++j)  b[i * C + j] -= f * b[k * C + j];
+        }
+    }
+    // Back-substitution.
+    for (int k = n - 1; k >= 0; --k) {
+        float inv = 1.f / A[k * n + k];
+        for (int j = 0; j < C; ++j) b[k * C + j] *= inv;
+        for (int i = 0; i < k; ++i)
+            for (int j = 0; j < C; ++j)
+                b[i * C + j] -= A[i * n + k] * b[k * C + j];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ELMEnsembleExperiment
+// ---------------------------------------------------------------------------
+ELMEnsembleExperiment::ELMEnsembleExperiment(
+    const ExperimentConfig& cfg,
+    const std::string& mnist_dir,
+    int num_networks)
+    : Experiment(cfg)
+    , mnist_dir_(mnist_dir)
+    , num_networks_(num_networks)
+{
+    FAYN_CUBLAS_CHECK(cublasCreate(&cublas_));
+}
+
+ELMEnsembleExperiment::~ELMEnsembleExperiment() {
+    if (cublas_) cublasDestroy(cublas_);
+}
+
+void ELMEnsembleExperiment::setup() {
+    members_.resize(static_cast<size_t>(num_networks_));
+
+    for (auto& m : members_) {
+        m.graph = std::make_unique<Graph>();
+
+        m.d0 = std::make_shared<DenseLayer>(784, 256, /*bias=*/true);
+        m.d0->set_compute_stats(false);
+        m.graph->add_node(m.d0);
+
+        auto relu = make_activation_layer(ActivationType::ReLU);
+        relu->set_compute_stats(false);
+        m.graph->add_node(std::move(relu));
+
+        m.d1 = std::make_shared<DenseLayer>(256, 10, /*bias=*/false);
+        m.d1->set_compute_stats(false);
+        const int n2 = m.graph->add_node(m.d1);
+
+        m.graph->add_edge(0, 1);
+        m.graph->add_edge(1, n2);
+    }
+
+    data_ = std::make_unique<MnistLoader>(
+        mnist_dir_ + "/train-images-idx3-ubyte",
+        mnist_dir_ + "/train-labels-idx1-ubyte");
+    data_->set_output_device(Device::CUDA);
+    data_->set_input_dtype(DType::BFloat16);
+}
+
+// ---------------------------------------------------------------------------
+// elm_fit: one data pass per member.
+//
+// For each member k:
+//   1. Run all N training samples through frozen d0_k + ReLU → H_k [N, d] FP32.
+//   2. (Shared across members) Build T [N, C] one-hot FP32.
+//   3. Normal equations on GPU via cuBLAS:
+//        A_k = H_k^T H_k  [d, d]
+//        b_k = H_k^T T    [d, C]
+//   4. Solve A_k W_k = b_k on CPU (Gaussian elimination, [d,d] = [256,256]).
+//   5. Transpose W_k [d, C] → [C, d], cast to BF16, write to d1_k->weights().
+//
+// cuBLAS convention note:
+//   Row-major [N, d] data = col-major [d, N] with ld = d.
+//   A_k = H_k^T H_k in row-major
+//       = H_cm * H_cm^T in col-major   → cublasSgemm(N, T, d, d, N, H, d, H, d, A, d)
+//   b_k = H_k^T T in row-major
+//       = H_cm * T_cm^T in col-major   → cublasSgemm(N, T, d, C, N, H, d, T, C, b, d)
+//   Both results are col-major. A_k is symmetric (A^T = A) so its col-major
+//   and row-major flat arrays are identical. b_k must be transposed from
+//   col-major [d, C] to row-major [d, C] before passing to gauss_solve.
+// ---------------------------------------------------------------------------
+void ELMEnsembleExperiment::elm_fit() {
+    const size_t fit_bs   = cfg_.batch_size;
+    // Floor-divide: drop the last partial batch for uniform-size allocation.
+    const size_t n_batches = data_->size() / fit_bs;
+    const size_t N        = n_batches * fit_bs;
+    const size_t d        = 256;
+    const size_t C        = 10;
+
+    // ---- Build T [N, C] one-hot FP32 on device ----
+    std::vector<float>   T_host(N * C, 0.f);
+    std::vector<int32_t> lbl_buf(fit_bs);
+    data_->reset();
+    for (size_t b = 0; b < n_batches; ++b) {
+        Batch batch = data_->next_batch(fit_bs);
+        FAYN_CUDA_CHECK(cudaMemcpy(lbl_buf.data(), batch.targets.data,
+                                   fit_bs * sizeof(int32_t),
+                                   cudaMemcpyDeviceToHost));
+        for (size_t i = 0; i < fit_bs; ++i)
+            T_host[(b * fit_bs + i) * C + static_cast<size_t>(lbl_buf[i])] = 1.f;
+    }
+    Tensor T_dev = Tensor::make({N, C}, DType::Float32, Device::CUDA);
+    FAYN_CUDA_CHECK(cudaMemcpy(T_dev.data, T_host.data(),
+                               N * C * sizeof(float), cudaMemcpyHostToDevice));
+    T_host.clear();
+
+    // Reusable host buffers (allocated once, reused per member).
+    std::vector<__nv_bfloat16> bf16_buf(fit_bs * d);
+    std::vector<float>          H_host(N * d);
+
+    for (auto& m : members_) {
+        // ---- Collect H_k [N, d] FP32 ----
+        data_->reset();
+        for (size_t b = 0; b < n_batches; ++b) {
+            Batch batch = data_->next_batch(fit_bs);
+            // Forward through d0 only (not the full graph).
+            // borrow() avoids a D2D copy; forward() syncs its stream before returning.
+            auto h = m.d0->forward(batch.inputs.borrow());  // BF16 [fit_bs, d]
+            apply_relu(h, /*stream=*/nullptr);
+            FAYN_CUDA_CHECK(cudaStreamSynchronize(nullptr));
+            FAYN_CUDA_CHECK(cudaMemcpy(bf16_buf.data(), h.data,
+                                       fit_bs * d * sizeof(__nv_bfloat16),
+                                       cudaMemcpyDeviceToHost));
+            for (size_t i = 0; i < fit_bs * d; ++i)
+                H_host[b * fit_bs * d + i] = __bfloat162float(bf16_buf[i]);
+        }
+
+        Tensor H_dev = Tensor::make({N, d}, DType::Float32, Device::CUDA);
+        FAYN_CUDA_CHECK(cudaMemcpy(H_dev.data, H_host.data(),
+                                   N * d * sizeof(float), cudaMemcpyHostToDevice));
+
+        // ---- Normal equations on GPU ----
+        Tensor A_dev = Tensor::make({d, d}, DType::Float32, Device::CUDA);
+        Tensor b_dev = Tensor::make({d, C}, DType::Float32, Device::CUDA);
+        const float alpha = 1.f, beta = 0.f;
+
+        FAYN_CUBLAS_CHECK(cublasSgemm(
+            cublas_, CUBLAS_OP_N, CUBLAS_OP_T,
+            (int)d, (int)d, (int)N, &alpha,
+            (float*)H_dev.data, (int)d,
+            (float*)H_dev.data, (int)d,
+            &beta, (float*)A_dev.data, (int)d));
+
+        FAYN_CUBLAS_CHECK(cublasSgemm(
+            cublas_, CUBLAS_OP_N, CUBLAS_OP_T,
+            (int)d, (int)C, (int)N, &alpha,
+            (float*)H_dev.data, (int)d,
+            (float*)T_dev.data, (int)C,
+            &beta, (float*)b_dev.data, (int)d));
+
+        FAYN_CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Copy A and b to CPU.
+        std::vector<float> A_cm(d * d), b_cm(d * C);
+        FAYN_CUDA_CHECK(cudaMemcpy(A_cm.data(), A_dev.data,
+                                   d * d * sizeof(float), cudaMemcpyDeviceToHost));
+        FAYN_CUDA_CHECK(cudaMemcpy(b_cm.data(), b_dev.data,
+                                   d * C * sizeof(float), cudaMemcpyDeviceToHost));
+
+        // A is symmetric (H^T H) so its col-major and row-major flat arrays
+        // are identical — pass A_cm directly as row-major to gauss_solve.
+        // Convert b from col-major [d, C] to row-major [d, C]:
+        //   b_rm[i * C + j] = b_cm[i + j * d]
+        std::vector<float> b_rm(d * C);
+        for (size_t i = 0; i < d; ++i)
+            for (size_t j = 0; j < C; ++j)
+                b_rm[i * C + j] = b_cm[i + j * d];
+
+        gauss_solve(A_cm, b_rm, (int)d, (int)C);
+
+        // b_rm now holds W_solve [d, C] row-major.
+        // d1->weights() shape is [C, d] row-major: W[j, i] = W_solve[i, j].
+        // Cast to BF16, transpose into weights layout.
+        std::vector<__nv_bfloat16> W_bf16(C * d);
+        for (size_t i = 0; i < d; ++i)
+            for (size_t j = 0; j < C; ++j)
+                W_bf16[j * d + i] = __float2bfloat16(b_rm[i * C + j]);
+
+        FAYN_CUDA_CHECK(cudaMemcpy(m.d1->weights().data, W_bf16.data(),
+                                   C * d * sizeof(__nv_bfloat16),
+                                   cudaMemcpyHostToDevice));
+    }
+
+    fmt::print("elm_fit: solved {} members ({} samples each)\n", members_.size(), N);
+}
+
+float ELMEnsembleExperiment::run_epoch(size_t epoch) {
+    if (!fitted_) {
+        elm_fit();
+        fitted_ = true;
+    }
+
+    data_->reset();
+    const size_t n_batches = data_->batches_per_epoch(cfg_.batch_size);
+    float total_acc = 0.f;
+
+    for (size_t b = 0; b < n_batches; ++b) {
+        Batch batch = data_->next_batch(cfg_.batch_size);
+        std::vector<Tensor> member_outputs;
+        member_outputs.reserve(members_.size());
+
+        for (size_t k = 0; k < members_.size(); ++k) {
+            const bool last = (k + 1 == members_.size());
+            Tensor inp = last ? std::move(batch.inputs) : batch.inputs.borrow();
+            std::vector<std::pair<int, Tensor>> fwd;
+            fwd.emplace_back(0, std::move(inp));
+            auto out = members_[k].graph->forward(std::move(fwd));
+            if (out.empty())
+                throw std::runtime_error(
+                    "ELMEnsembleExperiment: member graph produced no output");
+            member_outputs.push_back(std::move(out[0]));
+        }
+
+        std::vector<Tensor*> ptrs;
+        for (auto& t : member_outputs) ptrs.push_back(&t);
+        total_acc += ensemble_accuracy(ptrs, batch.targets);
+    }
+
+    const float acc = n_batches > 0 ? total_acc / (float)n_batches : 0.f;
+    fmt::print("epoch {:3d}  acc={:.4f}\n", epoch, acc);
+    return acc;
 }
 
 } // namespace fayn
