@@ -5,6 +5,22 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-10] Reward pipeline implemented: event-driven training loop
+**Date:** 2026-02-27
+
+The reward pipeline is fully wired. The training loop now only calls `graph.forward()` and emits `RewardEvent` — all weight updates are side effects of EventBus subscribers.
+
+Deliverables:
+- **`src/core/loss.hpp`** — `LossFn` type alias + `cross_entropy`, `accuracy`, `mse` (inline, CPU-side, handle BF16 output + Int32 label tensors)
+- **`src/ops/hebbian_updater.hpp`** — `HebbianUpdater` EventBus subscriber; subscribes to `RewardEvent` (sync), applies `ΔW ∝ reward × pre × post` per registered layer; `RoutingMode::Local` (no reward scaling) and `RoutingMode::Global` (reward-scaled lr); unsubscribes in destructor
+- **`src/stats/events.hpp`** — `RewardEvent` gains a `name` field for multi-signal support
+- **`HebbianMnistExperiment`** refactored: `run_epoch()` emits `RewardEvent{reward=-cross_entropy}` per batch; `HebbianUpdater` fires synchronously; no direct `hebbian_update()` calls in the loop
+- **2 new smoke tests** (10 total, all pass): `loss_cross_entropy`, `hebbian_updater_fires`
+
+**What is now possible:** Any experiment can plug in a different loss function, routing mode, or update subscriber without changing the training loop. The infrastructure is ready for perturbation, evolutionary, and contrastive Hebbian experiments.
+
+---
+
 ## [CP-09] Reward/loss pipeline design complete
 **Date:** 2026-02-27
 
