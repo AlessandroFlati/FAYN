@@ -196,16 +196,24 @@ public:
                 break;
         }
         // Stats kernel synchronises the stream internally.
-        StatsSnapshot snap = layer_stats_.compute_and_snapshot(id_, next_step(), out, guard.stream());
+        // When stats are disabled, still sync the stream so subsequent
+        // layers can safely read this layer's output.
+        if (compute_stats_) {
+            StatsSnapshot snap = layer_stats_.compute_and_snapshot(id_, next_step(), out, guard.stream());
 
-        ActivationEvent ev;
-        ev.layer_id = snap.layer_id;
-        ev.step     = snap.step;
-        ev.stats    = std::move(snap);
-        EventBus::instance().emit(ev);
+            ActivationEvent ev;
+            ev.layer_id = snap.layer_id;
+            ev.step     = snap.step;
+            ev.stats    = std::move(snap);
+            EventBus::instance().emit(ev);
+        } else {
+            FAYN_CUDA_CHECK(cudaStreamSynchronize(guard.stream()));
+        }
 
         return out;
     }
+
+    void set_compute_stats(bool v) noexcept override { compute_stats_ = v; }
 
     std::string name()        const override { return name_; }
     size_t      output_size() const override { return 0; }  // passthrough
@@ -217,6 +225,7 @@ private:
     std::string    custom_name_;
     std::string    name_;
     LayerStats     layer_stats_;   // lazy-init on first forward()
+    bool           compute_stats_ = true;
 };
 
 // ---------------------------------------------------------------------------

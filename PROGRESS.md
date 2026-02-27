@@ -5,6 +5,66 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-13] Ensemble of K random projections reaches ~79% — variance reduction confirmed
+**Date:** 2026-02-27
+
+`EnsembleHebbianMnistExperiment` runs K=10 independent networks (each: frozen
+random d0 + SupervisedHebbian d1) and combines logits by summation before argmax.
+
+**40-epoch learning curve (K=10, batch_size=512, lr=0.01):**
+```
+epoch   0  acc=0.3075        ← slow start (larger batch)
+epoch   5  acc=0.5493
+epoch  10  acc=0.6464
+epoch  20  acc=0.7659
+epoch  25  acc=0.7823        ← surpasses single-network 78% plateau
+epoch  29  acc=0.7900        ← peak vicinity
+epoch  36  acc=0.7934        ← peak observed
+epoch  39  acc=0.7912        ← plateau: oscillates ~79.1% ± 0.003
+```
+
+**Comparison:**
+
+| Configuration | Plateau accuracy | Epochs to plateau |
+|---|---|---|
+| Single network (batch=128) | ~78.0% | 5–6 |
+| Ensemble K=10 (batch=512) | ~79.1% | 25–30 |
+| Theoretical ELM ceiling (same arch) | ~93–96% | 1 pass |
+
+**Key finding:** Variance reduction from K=10 independent random projections
+yields ~+1% accuracy over the single network. The improvement is real but modest
+because the dominant bottleneck is **readout sub-optimality** (nearest-centroid
+learning vs. the globally-optimal linear separator), not feature diversity.
+
+With a better readout (delta-rule, pseudoinverse, perturbation learning) the
+ensemble gap would widen — each member would be closer to ELM ceiling (~95%) and
+the ensemble average would reduce residual variance further.
+
+**Performance on WSL2 (sm_120, CUDA 12.9):**
+K=10 ensemble runs at ~20 seconds/epoch with batch_size=512. The bottleneck is
+CUDA stream synchronization overhead per layer per batch (WSL2 incurs ~5ms per
+`cudaStreamSynchronize` call, × 3 layers × K members = ~150ms/batch at batch=128;
+reduced to ~40ms/batch at batch=512 via fewer batches). Stats collection is
+disabled for ensemble members via `set_compute_stats(false)` to avoid K×3×5
+blocking D2H copies per batch.
+
+**Infrastructure added:**
+- `experiments/ensemble_mnist/ensemble_mnist.{hpp,cpp}` — `EnsembleHebbianMnistExperiment`
+- `src/core/tensor.hpp/cpp` — `Tensor::borrow()` (non-owning view, zero-copy input sharing)
+- `src/core/layer.hpp` — `Layer::set_compute_stats(bool)` virtual (default no-op)
+- `src/ops/dense.hpp/cu` — `DenseLayer::set_compute_stats(bool)` override; skip D2H stats when false (still stream-syncs for correctness)
+- `src/ops/activations.cu` — `ActivationLayer::set_compute_stats(bool)` override; same pattern
+- `src/ops/dense.cu` — atomic seed counter in `kaiming_uniform_bf16` (ensures each ensemble member gets a distinct random d0 projection)
+- `tools/registry.hpp` — `FAYN_REGISTER_EXPERIMENT` macro changed to 3-arg form (name, class, unique_id) to avoid GCC `__COUNTER__` prescan limitation
+
+**What is now possible:** Population experiments (evolutionary, perturbation) can
+run K independent networks efficiently. The `borrow()` + `set_compute_stats(false)`
+pattern eliminates per-member D2D copy overhead and monitoring overhead.
+The next frontier: better readout rules per member (delta-rule, ELM pseudoinverse)
+to close the ~15% gap to backprop.
+
+---
+
 ## [CP-12] Supervised Hebbian readout achieves 78% on MNIST without backprop
 **Date:** 2026-02-27
 

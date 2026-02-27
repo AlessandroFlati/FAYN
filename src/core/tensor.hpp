@@ -90,6 +90,8 @@ struct Tensor {
     DType               dtype   = DType::BFloat16;
     Device              device  = Device::CPU;
 
+    bool                owned   = true;   // false → destructor skips free
+
     Tensor() = default;
     ~Tensor();
 
@@ -115,6 +117,11 @@ struct Tensor {
 
     // Return a new tensor on the target device (copies data if needed).
     Tensor to(Device target) const;
+
+    // Return a non-owning view with the same data pointer, shape, dtype and
+    // device. The caller must ensure the original outlives all uses of the
+    // view. The view's destructor does NOT free the underlying buffer.
+    Tensor borrow() const noexcept;
 
     // Return a contiguous copy (noop if already contiguous).
     Tensor contiguous() const;

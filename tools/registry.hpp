@@ -50,28 +50,27 @@ private:
 } // namespace fayn
 
 // ---------------------------------------------------------------------------
-// FAYN_REGISTER_EXPERIMENT(name, ExperimentClass)
+// FAYN_REGISTER_EXPERIMENT(name, ExperimentClass, unique_id)
 //
-// Place exactly once in the experiment's .cpp file.
+// Call in runner.cpp for each experiment that should be available at runtime.
 // The ExperimentClass must be constructible from (const ExperimentConfig&).
+// unique_id must be a valid C++ identifier, unique within runner.cpp.
+//
+// GCC does not pre-scan predefined macros (__COUNTER__, __LINE__) when they
+// appear as macro arguments, so a user-supplied unique_id is required.
 //
 // Example:
-//   FAYN_REGISTER_EXPERIMENT("hebbian_mnist", fayn::HebbianMnistExperiment)
+//   FAYN_REGISTER_EXPERIMENT("hebbian_mnist", fayn::HebbianMnistExperiment,
+//                             hebbian_mnist)
 // ---------------------------------------------------------------------------
-// Two-level macro so __COUNTER__ expands before token-pasting.
-// This avoids issues with namespaced class names (e.g. fayn::Foo) in ##.
-#define FAYN_REGISTER_EXPERIMENT_IMPL(name, ExperimentClass, counter)           \
+#define FAYN_REGISTER_EXPERIMENT(name, ExperimentClass, unique_id)              \
     namespace {                                                                  \
-    struct _ExperimentRegistrar_##counter {                                     \
-        _ExperimentRegistrar_##counter() {                                      \
-            fayn::ExperimentRegistry::instance().register_experiment(           \
-                name,                                                            \
-                [](const fayn::ExperimentConfig& cfg) {                         \
-                    return std::make_unique<ExperimentClass>(cfg);              \
-                });                                                              \
-        }                                                                        \
-    } _registrar_instance_##counter;                                            \
+    [[maybe_unused]] static const bool _fayn_reg_##unique_id = []() {           \
+        fayn::ExperimentRegistry::instance().register_experiment(               \
+            name,                                                                \
+            [](const fayn::ExperimentConfig& cfg) {                             \
+                return std::make_unique<ExperimentClass>(cfg);                  \
+            });                                                                  \
+        return true;                                                             \
+    }();                                                                         \
     }
-
-#define FAYN_REGISTER_EXPERIMENT(name, ExperimentClass) \
-    FAYN_REGISTER_EXPERIMENT_IMPL(name, ExperimentClass, __COUNTER__)

@@ -59,6 +59,10 @@ public:
     // Access per-layer stats (EMA state, dead ratio, etc.).
     const LayerStats& stats() const { return layer_stats_; }
 
+    // Disable per-forward-pass stats collection (reduces D2H copies + stream
+    // syncs for ensemble members that don't need live monitoring).
+    void set_compute_stats(bool v) noexcept override { compute_stats_ = v; }
+
     DenseLayer(const DenseLayer&) = delete;
     DenseLayer& operator=(const DenseLayer&) = delete;
 
@@ -77,6 +81,7 @@ private:
 
     LayerStats layer_stats_;
     bool       cache_activations_ = false;
+    bool       compute_stats_     = true;
     Tensor     last_input_;
     Tensor     last_output_;
     Tensor     target_activations_;  // [batch, out_features] BF16, device (optional)

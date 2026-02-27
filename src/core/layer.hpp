@@ -45,6 +45,10 @@ public:
     void set_id(int id) { id_ = id; }
     int  id()     const { return id_; }
 
+    // Disable per-forward-pass stats collection (no-op by default).
+    // Implementations that compute stats should override this.
+    virtual void set_compute_stats(bool) noexcept {}
+
     // Increment and return the per-layer step counter.
     size_t next_step() { return ++step_; }
     size_t step()      const { return step_; }

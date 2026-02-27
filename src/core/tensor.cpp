@@ -63,7 +63,7 @@ void Tensor::free_data() {
 }
 
 Tensor::~Tensor() {
-    free_data();
+    if (owned) free_data();
 }
 
 Tensor::Tensor(Tensor&& other) noexcept
@@ -72,19 +72,23 @@ Tensor::Tensor(Tensor&& other) noexcept
     , strides(std::move(other.strides))
     , dtype(other.dtype)
     , device(other.device)
+    , owned(other.owned)
 {
-    other.data = nullptr;
+    other.data  = nullptr;
+    other.owned = true;  // moved-from: no data to free, flag reset
 }
 
 Tensor& Tensor::operator=(Tensor&& other) noexcept {
     if (this == &other) return *this;
-    free_data();
+    if (owned) free_data();
     data    = other.data;
     shape   = std::move(other.shape);
     strides = std::move(other.strides);
     dtype   = other.dtype;
     device  = other.device;
-    other.data = nullptr;
+    owned   = other.owned;
+    other.data  = nullptr;
+    other.owned = true;
     return *this;
 }
 
@@ -141,6 +145,17 @@ Tensor Tensor::to(Device target) const {
         FAYN_CUDA_CHECK(cudaMemcpy(dst.data, data, nbytes(), cudaMemcpyDeviceToHost));
     }
     return dst;
+}
+
+Tensor Tensor::borrow() const noexcept {
+    Tensor t;
+    t.data    = data;
+    t.shape   = shape;
+    t.strides = strides;
+    t.dtype   = dtype;
+    t.device  = device;
+    t.owned   = false;
+    return t;
 }
 
 Tensor Tensor::contiguous() const {

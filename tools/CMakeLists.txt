@@ -9,6 +9,7 @@ target_include_directories(fayn_runner PRIVATE
 
 target_link_libraries(fayn_runner PRIVATE
     fayn_exp_hebbian_mnist
+    fayn_exp_ensemble_mnist
     fayn_experiments
     fayn_ops
     fayn_topology

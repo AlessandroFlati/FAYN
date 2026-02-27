@@ -5,6 +5,7 @@
 
 #include <cuda_bf16.h>
 #include <cublas_v2.h>
+#include <atomic>
 #include <stdexcept>
 #include <random>
 #include <vector>
@@ -51,9 +52,14 @@ static void kaiming_uniform_bf16(Tensor& w, size_t fan_in) {
     const size_t n   = w.numel();
     const float  std = sqrtf(2.0f / static_cast<float>(fan_in));
 
+    // Each DenseLayer gets a unique seed so ensemble members get different
+    // random projections. Seed sequence starts at 42 and increments atomically.
+    static std::atomic<uint64_t> seed_counter{42};
+    const uint64_t seed = seed_counter.fetch_add(1, std::memory_order_relaxed);
+
     // Allocate FP32 on host, fill, then cast on host, upload.
     std::vector<float>            fp32(n);
-    std::default_random_engine    rng(42);
+    std::default_random_engine    rng(seed);
     std::uniform_real_distribution<float> dist(-std, std);
     for (float& v : fp32) v = dist(rng);
 
@@ -187,13 +193,21 @@ Tensor DenseLayer::forward(const Tensor& x) {
 
     // Compute per-neuron stats, update EMAs, emit ActivationEvent.
     // Note: compute_and_snapshot() synchronises the stream internally.
-    StatsSnapshot snap = layer_stats_.compute_and_snapshot(id_, next_step(), output, stream);
+    // Skip when compute_stats_ is false (e.g. ensemble members that don't
+    // need live monitoring) to avoid blocking D2H copies on every batch.
+    // Always sync the stream: subsequent layers read this layer's output,
+    // so the output must be committed before forward() returns.
+    if (compute_stats_) {
+        StatsSnapshot snap = layer_stats_.compute_and_snapshot(id_, next_step(), output, stream);
 
-    ActivationEvent ev;
-    ev.layer_id = snap.layer_id;
-    ev.step     = snap.step;
-    ev.stats    = std::move(snap);
-    EventBus::instance().emit(ev);
+        ActivationEvent ev;
+        ev.layer_id = snap.layer_id;
+        ev.step     = snap.step;
+        ev.stats    = std::move(snap);
+        EventBus::instance().emit(ev);
+    } else {
+        FAYN_CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
 
     return output;
 }

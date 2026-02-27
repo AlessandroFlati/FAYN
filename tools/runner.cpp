@@ -12,8 +12,10 @@
 // Add one block per experiment as it is created.
 // ---------------------------------------------------------------------------
 #include "experiments/hebbian_mnist/hebbian_mnist.hpp"
+#include "experiments/ensemble_mnist/ensemble_mnist.hpp"
 
-FAYN_REGISTER_EXPERIMENT("hebbian_mnist", fayn::HebbianMnistExperiment)
+FAYN_REGISTER_EXPERIMENT("hebbian_mnist",  fayn::HebbianMnistExperiment,         hebbian_mnist)
+FAYN_REGISTER_EXPERIMENT("ensemble_mnist", fayn::EnsembleHebbianMnistExperiment, ensemble_mnist)
 
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog << " <experiment_name> [options]\n"
