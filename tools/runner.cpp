@@ -5,10 +5,15 @@
 #include <string>
 
 // ---------------------------------------------------------------------------
-// Include experiment headers to trigger their FAYN_REGISTER_EXPERIMENT calls.
-// Add one line per experiment as it is created.
+// Experiment registration.
+// Include each experiment header and register it here. Static initializers
+// in runner.cpp are guaranteed to run; registering here avoids the
+// --whole-archive linker requirement for experiment static libraries.
+// Add one block per experiment as it is created.
 // ---------------------------------------------------------------------------
 #include "experiments/hebbian_mnist/hebbian_mnist.hpp"
+
+FAYN_REGISTER_EXPERIMENT("hebbian_mnist", fayn::HebbianMnistExperiment)
 
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog << " <experiment_name> [options]\n"

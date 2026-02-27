@@ -14,4 +14,5 @@ target_link_libraries(fayn_topology PUBLIC
 set_target_properties(fayn_topology PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS OFF
 )

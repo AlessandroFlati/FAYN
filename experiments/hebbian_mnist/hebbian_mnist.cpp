@@ -103,8 +103,3 @@ float HebbianMnistExperiment::run_epoch(size_t epoch) {
 }
 
 } // namespace fayn
-
-// ---------------------------------------------------------------------------
-// Self-register.
-// ---------------------------------------------------------------------------
-FAYN_REGISTER_EXPERIMENT("hebbian_mnist", fayn::HebbianMnistExperiment)

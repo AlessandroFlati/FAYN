@@ -35,7 +35,7 @@ LD_LIBRARY_PATH="/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH" \
   ./build-linux/tools/fayn_smoke
 ```
 
-All 8 tests must pass before committing. If output is missing due to buffering,
+All 10 tests must pass before committing. If output is missing due to buffering,
 prefix with `stdbuf -oL -eL`.
 
 ### Windows MSVC build (secondary)
@@ -179,6 +179,8 @@ FAYN/
 | `std::promise` not `CopyConstructible` | `std::function` lambda capture | Capture via `shared_ptr` |
 | C++20 template-lambda `[&]<typename T>` not valid in CUDA | nvcc | Use explicit switch-case per DType |
 | `FAYN_REGISTER_EXPERIMENT` with namespaced class `::` | Macro token concat | Use `__COUNTER__` via two-level helper |
+| Pure-CXX static lib gets spurious `cmake_device_link.o` | CMake 3.28 propagates CUDA device-link req through `PUBLIC` link deps | Set `CUDA_RESOLVE_DEVICE_SYMBOLS OFF` on all pure-CXX libs that transitively depend on CUDA separable libs |
+| `fayn` runner CUDA device-link missing | Pure-CXX executable doesn't auto-get device-link step | Add a trivial `.cu` stub (`runner_cuda.cu`) to the executable and set `CUDA_SEPARABLE_COMPILATION ON` + `LINKER_LANGUAGE CUDA` on the target |
 
 ---
 

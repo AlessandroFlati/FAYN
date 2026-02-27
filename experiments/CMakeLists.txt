@@ -16,6 +16,7 @@ target_link_libraries(fayn_experiments PUBLIC
 set_target_properties(fayn_experiments PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS OFF
 )
 
 add_subdirectory(hebbian_mnist)

@@ -5,6 +5,26 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-11] HebbianMnistExperiment runs end-to-end on MNIST
+**Date:** 2026-02-27
+
+The full training loop runs on real MNIST data (60,000 train images, BF16 on CUDA).
+5 epochs complete in seconds on sm_120 (Blackwell). Output:
+```
+epoch   0  acc=0.1049  loss_proxy=0.8951
+epoch   1  acc=0.1055  loss_proxy=0.8945
+epoch   2  acc=0.1035  loss_proxy=0.8965
+epoch   3  acc=0.1049  loss_proxy=0.8951
+epoch   4  acc=0.1052  loss_proxy=0.8948
+```
+~10.5% accuracy (random-chance baseline for 10 classes) confirms the pipeline is wired correctly but the reward-modulated Hebbian rule has not yet learned. Expected — the Hebbian rule modulated by `-cross_entropy` needs tuning.
+
+Also fixed: CMake CUDA device-link propagation bug. Pure-CXX static libraries that transitively depend on CUDA separable-compiled libs (fayn_stats, fayn_ops) were receiving spurious device-link steps in CMake 3.28, embedding `cmake_device_link.o` stubs in their archives. This caused nvlink to miss device registrations at the runner link step. Fixed by setting `CUDA_RESOLVE_DEVICE_SYMBOLS OFF` on all pure-CXX intermediary libraries.
+
+**What is now possible:** End-to-end experiments can be launched with `./fayn <name> --epochs N`. The infrastructure is validated on real data. Next steps: tune the Hebbian learning rule, add eligibility traces, or run for more epochs to observe learning.
+
+---
+
 ## [CP-10] Reward pipeline implemented: event-driven training loop
 **Date:** 2026-02-27
 

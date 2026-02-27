@@ -1,5 +1,6 @@
 add_executable(fayn_runner
     runner.cpp
+    runner_cuda.cu   # triggers CUDA device-link step for separable-compiled deps
 )
 
 target_include_directories(fayn_runner PRIVATE
@@ -22,6 +23,8 @@ set_target_properties(fayn_runner PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
     OUTPUT_NAME "fayn"
+    LINKER_LANGUAGE CUDA
+    CUDA_SEPARABLE_COMPILATION ON
 )
 
 # ---------------------------------------------------------------------------
