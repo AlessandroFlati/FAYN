@@ -57,4 +57,19 @@ void weight_decay_weights(
     float        decay,
     cudaStream_t stream = nullptr);
 
+// ---------------------------------------------------------------------------
+// tensor_subtract_bf16: allocate and return a new tensor C = A − B,
+// element-wise in BF16.
+//
+// Used by HebbianUpdater::DeltaRule mode to compute the error signal
+// (target − output) without modifying either input tensor.
+//
+// A, B: same shape, BF16, device.
+// Returns: new BF16 device tensor with the same shape.
+// ---------------------------------------------------------------------------
+Tensor tensor_subtract_bf16(
+    const Tensor& a,
+    const Tensor& b,
+    cudaStream_t  stream = nullptr);
+
 } // namespace fayn

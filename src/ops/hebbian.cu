@@ -177,4 +177,40 @@ void normalize_weights_rows(Tensor& weights, float eps, cudaStream_t stream) {
     FAYN_CUDA_CHECK(cudaGetLastError());
 }
 
+// ---------------------------------------------------------------------------
+// subtract_bf16_kernel: C[i] = A[i] - B[i], element-wise in BF16.
+// ---------------------------------------------------------------------------
+__global__ void subtract_bf16_kernel(
+    __nv_bfloat16*       C,
+    const __nv_bfloat16* A,
+    const __nv_bfloat16* B,
+    size_t               n)
+{
+    const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+        C[i] = __float2bfloat16(static_cast<float>(A[i]) - static_cast<float>(B[i]));
+}
+
+Tensor tensor_subtract_bf16(const Tensor& a, const Tensor& b, cudaStream_t stream) {
+    if (a.device != Device::CUDA || b.device != Device::CUDA)
+        throw std::runtime_error("tensor_subtract_bf16: tensors must be on CUDA");
+    if (a.dtype != DType::BFloat16 || b.dtype != DType::BFloat16)
+        throw std::runtime_error("tensor_subtract_bf16: tensors must be BFloat16");
+    if (a.shape != b.shape)
+        throw std::runtime_error("tensor_subtract_bf16: shape mismatch");
+
+    Tensor c = Tensor::make(a.shape, DType::BFloat16, Device::CUDA);
+    const size_t n  = a.numel();
+    constexpr int TX = 256;
+    const int grid  = static_cast<int>((n + TX - 1) / TX);
+
+    subtract_bf16_kernel<<<grid, TX, 0, stream>>>(
+        static_cast<__nv_bfloat16*>(c.data),
+        static_cast<const __nv_bfloat16*>(a.data),
+        static_cast<const __nv_bfloat16*>(b.data),
+        n);
+    FAYN_CUDA_CHECK(cudaGetLastError());
+    return c;
+}
+
 } // namespace fayn

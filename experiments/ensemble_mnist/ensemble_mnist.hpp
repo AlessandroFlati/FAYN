@@ -54,7 +54,8 @@ public:
         float                   lr_final        = -1.f,
         bool                    row_normalize   = true,
         float                   weight_decay    = 0.f,
-        int                     hidden_dim      = 256);
+        int                     hidden_dim      = 256,
+        bool                    use_delta_rule  = false);
 
 protected:
     void  setup()                  override;
@@ -79,6 +80,7 @@ private:
     bool                 row_normalize_   = true;
     float                weight_decay_    = 0.f;
     int                  hidden_dim_      = 256;
+    bool                 use_delta_rule_  = false;
     size_t               step_            = 0;
 
     std::vector<Member>  members_;

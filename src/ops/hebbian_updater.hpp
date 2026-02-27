@@ -29,6 +29,9 @@ namespace fayn {
 //   SupervisedHebbian — uses target_activations (one-hot) as post instead of
 //                       last_output; reward scalar ignored, lr always applied.
 //                       Pulls each class weight row toward hidden reps of that class.
+//   DeltaRule        — uses (target − output) as post (gradient of MSE loss).
+//                       Self-stabilizing: updates → 0 as ŷ → T. Converges
+//                       iteratively to the ELM solution (H^T H)^{-1} H^T T.
 //
 // Usage:
 //   auto updater = std::make_unique<HebbianUpdater>({{
@@ -40,7 +43,7 @@ namespace fayn {
 // ---------------------------------------------------------------------------
 class HebbianUpdater {
 public:
-    enum class RoutingMode { Local, Global, SupervisedHebbian };
+    enum class RoutingMode { Local, Global, SupervisedHebbian, DeltaRule };
 
     struct LayerConfig {
         std::shared_ptr<DenseLayer>   layer;
@@ -107,13 +110,24 @@ private:
 
             if (effective_lr == 0.f) continue;
 
-            // SupervisedHebbian: use target_activations (one-hot) as post,
-            // so each class row is pulled toward the hidden reps of that class.
-            const Tensor& post =
-                (cfg.mode == RoutingMode::SupervisedHebbian &&
-                 cfg.layer->has_target_activations())
-                ? cfg.layer->target_activations()
-                : cfg.layer->last_output();
+            // Select post-synaptic signal based on routing mode.
+            // DeltaRule: post = target − output (gradient of MSE).
+            //   Self-stabilizing (updates → 0 as ŷ → T) and converges to ELM solution.
+            // SupervisedHebbian: post = one-hot target (normalized centroid learning).
+            // Otherwise: post = last_output (unsupervised Hebbian).
+            Tensor delta_post;
+            const Tensor* post_ptr;
+            if (cfg.mode == RoutingMode::SupervisedHebbian &&
+                cfg.layer->has_target_activations()) {
+                post_ptr = &cfg.layer->target_activations();
+            } else if (cfg.mode == RoutingMode::DeltaRule &&
+                       cfg.layer->has_target_activations()) {
+                delta_post = tensor_subtract_bf16(
+                    cfg.layer->target_activations(), cfg.layer->last_output(), stream);
+                post_ptr = &delta_post;
+            } else {
+                post_ptr = &cfg.layer->last_output();
+            }
 
             // Pre-synaptic activations: optionally L2-normalise each feature
             // vector (row) so that H^T H ≈ (N/d)·I, making the Hebbian
@@ -136,7 +150,7 @@ private:
 
             hebbian_update(cfg.layer->weights(),
                            *pre_ptr,
-                           post,
+                           *post_ptr,
                            effective_lr, stream);
 
             ++step_counters_[i];

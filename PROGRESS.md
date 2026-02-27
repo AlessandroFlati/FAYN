@@ -5,6 +5,56 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-19] Delta rule closes ELM gap from 13% to 3% at 2048h
+**Date:** 2026-02-27 21:22 UTC
+
+Added `RoutingMode::DeltaRule` to `HebbianUpdater`. Instead of using the one-hot
+target as the post-synaptic signal (SupervisedHebbian), the delta rule uses the
+**error signal** `(T − Ŷ)` as post. This is the gradient of MSE loss:
+
+```
+ΔW = (lr / N) * (T − Ŷ)^T @ H   where   Ŷ = H @ W^T
+```
+
+This converges iteratively to the ELM solution `(H^T H)^{-1} H^T T` without a
+matrix solve. Self-stabilizing: updates → 0 as `Ŷ → T` (no row-norm or WD needed).
+New files: `tensor_subtract_bf16()` kernel in `hebbian.cu`.
+New `use_delta_rule` parameter on `EnsembleHebbianMnistExperiment`.
+
+**Results (K=10, seed=42, lr=0.01, 30 epochs):**
+
+| Experiment | hidden | init_scale | Method | Acc |
+|---|---|---|---|---|
+| `ensemble_mnist_delta`          | 256  | 1.0  | DeltaRule | **84.2%** |
+| `ensemble_mnist_delta_scaled`   | 256  | 19.8 | DeltaRule | **COLLAPSED** |
+| `ensemble_mnist_delta_2048`     | 2048 | 1.0  | DeltaRule | **92.5%** |
+| `ensemble_mnist_delta_scaled_2048` | 2048 | 19.8 | DeltaRule | **COLLAPSED** |
+| *(reference)* `ensemble_mnist_scaled` | 256 | 19.8 | Hebbian | 81.4% |
+| *(reference)* `ensemble_mnist_2048`   | 2048 | 1.0  | Hebbian | 82.1% |
+| *(reference)* `elm_ensemble_scaled_2048` | 2048 | 19.8 | ELM | 95.6% |
+
+**Key findings:**
+
+1. **Delta rule at 2048h: 92.5% vs 82.1% Hebbian (+10.4%)**. Gap to ELM (95.4%)
+   shrinks from 13.3% to **2.9%**. The delta rule correctly accounts for feature
+   covariance by using the error signal rather than the raw target.
+
+2. **Scaled init collapses with delta rule at lr=0.01**. The LMS stability
+   condition requires `lr < 2 / λ_max(H^T H)`. With init_scale=19.8, H has
+   std ≈ 6 (vs ≈ 0.3 for Kaiming), so `λ_max` is ~400× larger. The learning
+   rate exceeds the stability bound → runaway oscillation → dead network.
+   Fix: reduce lr by ~400× (impractically small) or use `normalize_pre=True`
+   (makes `λ_max` independent of feature scale). Noted as a direction for CP-20.
+
+3. **Delta rule at 256h: 84.2% vs 81.4% Hebbian (+2.8%)**. Smaller gain than
+   at 2048h because at low width the ELM correction matters less (H^T H is
+   closer to diagonal).
+
+4. **Row-norm not needed**: delta rule is self-stabilizing. No sphere projection,
+   no BF16 ceiling as in WD (CP-17). Weights stay small as errors → 0.
+
+---
+
 ## [CP-18] Width 256 → 2048: ELM jumps to 95.6%, Hebbian stalls at 82%
 **Date:** 2026-02-27 21:01 UTC
 

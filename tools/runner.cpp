@@ -168,6 +168,68 @@ namespace {
         });
     return true;
 }();
+// ---------------------------------------------------------------------------
+// Delta-rule variants: post = (T − Ŷ) instead of post = T (SupervisedHebbian).
+// This is the gradient of MSE and converges iteratively to the ELM solution
+// (H^T H)^{-1} H^T T without a matrix solve. Self-stabilizing (no row-norm
+// or weight-decay needed — updates → 0 as Ŷ → T).
+// ---------------------------------------------------------------------------
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_delta = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_delta",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/0.01f, /*K=*/10, /*norm_every=*/1,
+                /*scale=*/1.0f, /*seed=*/42LL,
+                /*normalize_pre=*/false, /*lr_final=*/-1.f,
+                /*row_normalize=*/false, /*weight_decay=*/0.f,
+                /*hidden_dim=*/256, /*use_delta_rule=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_delta_scaled = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_delta_scaled",
+        [](const fayn::ExperimentConfig& cfg) {
+            constexpr float   kScale = 19.8f;
+            constexpr int64_t kSeed  = 42;
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/0.01f, /*K=*/10, /*norm_every=*/1,
+                kScale, kSeed,
+                /*normalize_pre=*/false, /*lr_final=*/-1.f,
+                /*row_normalize=*/false, /*weight_decay=*/0.f,
+                /*hidden_dim=*/256, /*use_delta_rule=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_delta_2048 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_delta_2048",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/0.01f, /*K=*/10, /*norm_every=*/1,
+                /*scale=*/1.0f, /*seed=*/42LL,
+                /*normalize_pre=*/false, /*lr_final=*/-1.f,
+                /*row_normalize=*/false, /*weight_decay=*/0.f,
+                /*hidden_dim=*/2048, /*use_delta_rule=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_delta_scaled_2048 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_delta_scaled_2048",
+        [](const fayn::ExperimentConfig& cfg) {
+            constexpr float   kScale = 19.8f;
+            constexpr int64_t kSeed  = 42;
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/0.01f, /*K=*/10, /*norm_every=*/1,
+                kScale, kSeed,
+                /*normalize_pre=*/false, /*lr_final=*/-1.f,
+                /*row_normalize=*/false, /*weight_decay=*/0.f,
+                /*hidden_dim=*/2048, /*use_delta_rule=*/true);
+        });
+    return true;
+}();
 }
 
 static void print_usage(const char* prog) {

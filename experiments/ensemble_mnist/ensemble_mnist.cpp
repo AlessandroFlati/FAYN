@@ -28,7 +28,8 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     float                   lr_final,
     bool                    row_normalize,
     float                   weight_decay,
-    int                     hidden_dim)
+    int                     hidden_dim,
+    bool                    use_delta_rule)
     : Experiment(cfg)
     , mnist_dir_(mnist_dir)
     , lr_(lr)
@@ -41,6 +42,7 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     , row_normalize_(row_normalize)
     , weight_decay_(weight_decay)
     , hidden_dim_(hidden_dim)
+    , use_delta_rule_(use_delta_rule)
 {}
 
 // ---------------------------------------------------------------------------
@@ -100,7 +102,9 @@ void EnsembleHebbianMnistExperiment::setup() {
         HebbianUpdater::LayerConfig lcfg;
         lcfg.layer           = m.d1;
         lcfg.lr              = lr_;
-        lcfg.mode            = HebbianUpdater::RoutingMode::SupervisedHebbian;
+        lcfg.mode            = use_delta_rule_
+                                   ? HebbianUpdater::RoutingMode::DeltaRule
+                                   : HebbianUpdater::RoutingMode::SupervisedHebbian;
         lcfg.normalize       = row_normalize_;
         lcfg.normalize_every = normalize_every_;
         lcfg.normalize_pre   = normalize_pre_;
