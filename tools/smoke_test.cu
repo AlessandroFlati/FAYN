@@ -1,9 +1,11 @@
 #include "src/core/device.hpp"
+#include "src/core/loss.hpp"
 #include "src/core/tensor.hpp"
 #include "src/core/graph.hpp"
 #include "src/ops/activations.hpp"
 #include "src/ops/dense.hpp"
 #include "src/ops/hebbian.hpp"
+#include "src/ops/hebbian_updater.hpp"
 #include "src/stats/activation_stats.hpp"
 #include "src/stats/event_bus.hpp"
 #include "src/stats/events.hpp"
@@ -307,6 +309,85 @@ static void test_graph_forward_mlp() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 9: cross_entropy — uniform logits should give CE = log(C)
+// ---------------------------------------------------------------------------
+static void test_loss_cross_entropy() {
+    const char* TEST = "loss_cross_entropy";
+
+    // output: [4, 3] BF16, all zeros (uniform logits → softmax = 1/3 each)
+    // target: [4] Int32, labels [0, 1, 2, 0]
+    const size_t BATCH = 4, C = 3;
+
+    fayn::Tensor output = fayn::Tensor::make({BATCH, C}, fayn::DType::BFloat16, fayn::Device::CUDA);
+    // Tensor::make zero-initialises, so all logits are 0.0 in BF16.
+
+    fayn::Tensor target = fayn::Tensor::make({BATCH}, fayn::DType::Int32, fayn::Device::CUDA);
+    int32_t lbl_h[4] = {0, 1, 2, 0};
+    FAYN_CUDA_CHECK(cudaMemcpy(target.data, lbl_h, BATCH * sizeof(int32_t), cudaMemcpyHostToDevice));
+
+    const float ce = fayn::cross_entropy(output, target);
+
+    // Uniform softmax over 3 classes: CE = -log(1/3) = log(3) ≈ 1.0986
+    const float expected = std::log(static_cast<float>(C));
+    if (std::abs(ce - expected) > 0.05f)
+        FAIL(TEST, "cross_entropy value far from log(C) for uniform logits");
+
+    PASS(TEST);
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: HebbianUpdater — weights change when RewardEvent is emitted
+// ---------------------------------------------------------------------------
+static void test_hebbian_updater_fires() {
+    const char* TEST = "hebbian_updater_fires";
+
+    const size_t BATCH = 16, IN = 32, OUT = 16;
+
+    auto layer = std::make_shared<fayn::DenseLayer>(IN, OUT, /*use_bias=*/false);
+    layer->set_cache_activations(true);
+    layer->set_id(0);
+
+    // Forward pass to populate last_input_ / last_output_.
+    fayn::Tensor x = fayn::Tensor::make({BATCH, IN}, fayn::DType::BFloat16, fayn::Device::CUDA);
+    {
+        const uint16_t one = f32_to_bf16_bits(1.0f);
+        std::vector<uint16_t> host(BATCH * IN, one);
+        FAYN_CUDA_CHECK(cudaMemcpy(x.data, host.data(), BATCH * IN * 2, cudaMemcpyHostToDevice));
+    }
+    layer->forward(x);
+
+    // Snapshot weights before the update.
+    const size_t W_N = OUT * IN;
+    std::vector<uint16_t> before(W_N), after_w(W_N);
+    FAYN_CUDA_CHECK(cudaMemcpy(before.data(), layer->weights().data,
+                               W_N * 2, cudaMemcpyDeviceToHost));
+
+    // Create updater (subscribes to RewardEvent on construction).
+    fayn::HebbianUpdater updater({{layer, /*lr=*/0.1f,
+                                   fayn::HebbianUpdater::RoutingMode::Global,
+                                   /*normalize=*/false}});
+
+    // Emit reward — updater fires synchronously and applies hebbian_update.
+    fayn::RewardEvent ev;
+    ev.step   = 0;
+    ev.reward = 1.0f;
+    fayn::EventBus::instance().emit(ev);
+
+    FAYN_CUDA_CHECK(cudaMemcpy(after_w.data(), layer->weights().data,
+                               W_N * 2, cudaMemcpyDeviceToHost));
+
+    bool any_changed = false;
+    for (size_t i = 0; i < W_N; ++i)
+        if (before[i] != after_w[i]) { any_changed = true; break; }
+
+    if (!any_changed)
+        FAIL(TEST, "weights did not change after RewardEvent emission");
+
+    PASS(TEST);
+    // updater destructor unsubscribes.
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main() {
@@ -322,6 +403,8 @@ int main() {
     test_hebbian_weight_change();
     test_eventbus_sync_dispatch();
     test_graph_forward_mlp();
+    test_loss_cross_entropy();
+    test_hebbian_updater_fires();
 
     std::cout << "=== All tests passed ===\n";
     return 0;

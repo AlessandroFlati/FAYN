@@ -62,9 +62,12 @@ struct EpochEvent {
 };
 
 // Emitted when the task emits a scalar reward / fitness signal.
+// Multiple named signals can be emitted in the same step; subscribers
+// may filter by name if they only react to a specific signal.
 struct RewardEvent {
-    size_t step   = 0;
-    float  reward = 0.0f;
+    std::string name   = "reward";
+    size_t      step   = 0;
+    float       reward = 0.0f;
 };
 
 } // namespace fayn
