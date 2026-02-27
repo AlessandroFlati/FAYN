@@ -125,6 +125,35 @@ void hebbian_update(
 }
 
 // ---------------------------------------------------------------------------
+// Weight-decay kernel: W[i] *= scale   (scale = 1 - decay)
+// ---------------------------------------------------------------------------
+__global__ void scale_bf16_kernel(
+    __nv_bfloat16* W,
+    float          scale,
+    size_t         n)
+{
+    const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+        W[i] = __float2bfloat16(static_cast<float>(W[i]) * scale);
+}
+
+void weight_decay_weights(Tensor& weights, float decay, cudaStream_t stream) {
+    if (weights.device != Device::CUDA)
+        throw std::runtime_error("weight_decay_weights: tensor must be on CUDA");
+    if (weights.dtype != DType::BFloat16)
+        throw std::runtime_error("weight_decay_weights: tensor must be BFloat16");
+
+    const size_t n     = weights.numel();
+    constexpr int TX   = 256;
+    const int     grid = static_cast<int>((n + TX - 1) / TX);
+
+    scale_bf16_kernel<<<grid, TX, 0, stream>>>(
+        static_cast<__nv_bfloat16*>(weights.data),
+        1.0f - decay, n);
+    FAYN_CUDA_CHECK(cudaGetLastError());
+}
+
+// ---------------------------------------------------------------------------
 // normalize_weights_rows
 // ---------------------------------------------------------------------------
 void normalize_weights_rows(Tensor& weights, float eps, cudaStream_t stream) {

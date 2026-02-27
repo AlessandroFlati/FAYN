@@ -40,4 +40,21 @@ void normalize_weights_rows(
     float        eps    = 1e-8f,
     cudaStream_t stream = nullptr);
 
+// ---------------------------------------------------------------------------
+// weight_decay_weights: W ← W * (1 - decay), element-wise.
+//
+// Pre-step L2 regularisation. Applied before the Hebbian update so that
+// steady state satisfies  decay·W* = (lr/N)·H^T T,  i.e.
+//   W* ∝ H^T T   (centroid direction, magnitude lr/(N·decay)).
+//
+// Use instead of normalize_weights_rows when you want soft magnitude control
+// rather than a hard unit-sphere projection.
+//
+// W: [out, in] BF16, device (updated in place).
+// ---------------------------------------------------------------------------
+void weight_decay_weights(
+    Tensor&      weights,
+    float        decay,
+    cudaStream_t stream = nullptr);
+
 } // namespace fayn

@@ -5,6 +5,57 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-17] Weight decay fails in BF16; row-norm is precision management, not just regularisation
+**Date:** 2026-02-27 16:12 UTC
+
+Replaced `normalize_weights_rows` (hard sphere projection) with pre-step weight
+decay (`W ← (1-λ)·W` before each Hebbian update) and tested three decay values.
+New `LayerConfig` field `weight_decay = 0.f`; when > 0 and `normalize = false`,
+`weight_decay_weights()` runs as a scalar-multiply kernel before `hebbian_update`.
+
+**Results (K=10, init_scale=19.8, seed=42, lr=0.01, 100 epochs):**
+
+| Experiment | λ | Final acc |
+|---|---|---|
+| `ensemble_mnist_scaled` (row-norm, reference) | — | 81.4% |
+| `ensemble_mnist_wd1e3` | 1×10⁻³ | **55%** |
+| `ensemble_mnist_wd1e4` | 1×10⁻⁴ | **55%** |
+| `elm_ensemble_scaled` (ELM, ceiling) | — | 86.3% |
+
+Both WD variants plateau at ~55% — far below row-norm — and do NOT improve
+with smaller decay. BF16 precision analysis explains why:
+
+**The BF16 precision ceiling:**
+
+The per-step Hebbian delta for one weight element:
+  `Δ = (lr/batch) × (batch/10) × feature_val ≈ 0.0025`
+
+Weight decay steady state:  `W* = Δ/λ`
+
+| λ | W* | BF16 step at W* | Δ/step | Status |
+|---|---|---|---|---|
+| 1e-3 | 2.50 | 0.0156 | 0.16 | **LOST** |
+| 1e-4 | 25.0 | 0.125  | 0.02 | **LOST** |
+| row-norm | 0.088 | 0.00049 | 5.12 | **OK** |
+
+For any practically useful decay (λ ≤ 0.028), the steady-state weight grows
+into a BF16 range where Hebbian deltas round to zero. The weights freeze at a
+poor approximation of the centroid direction.
+
+For λ > 0.028, W* stays in the BF16-precise range, but the memory horizon
+(1/λ ≈ 36 steps) is too short to accumulate stable class prototypes.
+
+**Conclusion — row-norm solves two problems simultaneously:**
+1. **Explosion prevention**: bounds W to the unit sphere
+2. **BF16 precision management**: pins per-element magnitude to ≈0.088, giving
+   5× headroom above the BF16 precision floor at every training step
+
+Weight decay cannot replicate this: any λ that keeps W small enough for BF16
+precision erases class information within one epoch. Row-norm is the natural
+invariant for Hebbian learning in BF16.
+
+---
+
 ## [CP-16] Feature normalisation and LR scheduling confirm structural Hebbian–ELM gap
 **Date:** 2026-02-27 14:06 UTC
 

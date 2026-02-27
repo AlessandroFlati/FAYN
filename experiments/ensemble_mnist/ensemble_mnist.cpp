@@ -25,7 +25,9 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     float                   d0_init_scale,
     int64_t                 seed,
     bool                    normalize_pre,
-    float                   lr_final)
+    float                   lr_final,
+    bool                    row_normalize,
+    float                   weight_decay)
     : Experiment(cfg)
     , mnist_dir_(mnist_dir)
     , lr_(lr)
@@ -35,6 +37,8 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     , seed_(seed)
     , normalize_pre_(normalize_pre)
     , lr_final_(lr_final)
+    , row_normalize_(row_normalize)
+    , weight_decay_(weight_decay)
 {}
 
 // ---------------------------------------------------------------------------
@@ -95,10 +99,11 @@ void EnsembleHebbianMnistExperiment::setup() {
         lcfg.layer           = m.d1;
         lcfg.lr              = lr_;
         lcfg.mode            = HebbianUpdater::RoutingMode::SupervisedHebbian;
-        lcfg.normalize       = true;
+        lcfg.normalize       = row_normalize_;
         lcfg.normalize_every = normalize_every_;
         lcfg.normalize_pre   = normalize_pre_;
         lcfg.lr_schedule     = lr_sched;   // empty if no scheduling
+        lcfg.weight_decay    = weight_decay_;
 
         m.updater = std::make_unique<HebbianUpdater>(
             std::vector<HebbianUpdater::LayerConfig>{ std::move(lcfg) });

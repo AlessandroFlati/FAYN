@@ -55,6 +55,11 @@ public:
         // Optional per-step LR schedule. If set, called with ev.step and its
         // return value replaces cfg.lr. Useful for cosine/linear annealing.
         std::function<float(size_t)>  lr_schedule;
+        // Pre-step weight decay: W ← W*(1-decay) before each Hebbian update.
+        // Soft alternative to normalize (hard sphere projection). At steady
+        // state W* ∝ H^T T (same direction as row-norm), but allows non-unit
+        // magnitudes and smoother dynamics. Use normalize=false with this.
+        float                         weight_decay    = 0.f;
     };
 
     explicit HebbianUpdater(std::vector<LayerConfig> layers)
@@ -124,6 +129,10 @@ private:
                 normalize_weights_rows(pre_normed, 1e-8f, stream);
                 pre_ptr = &pre_normed;
             }
+
+            // Pre-step weight decay: W ← (1-decay)*W before Hebbian update.
+            if (cfg.weight_decay > 0.f)
+                weight_decay_weights(cfg.layer->weights(), cfg.weight_decay, stream);
 
             hebbian_update(cfg.layer->weights(),
                            *pre_ptr,
