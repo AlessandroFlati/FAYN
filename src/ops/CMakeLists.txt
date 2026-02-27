@@ -2,6 +2,7 @@ add_library(fayn_ops STATIC
     activations.cu
     dense.cu
     hebbian.cu
+    one_hot.cu
 )
 
 target_include_directories(fayn_ops PUBLIC

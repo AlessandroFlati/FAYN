@@ -23,8 +23,11 @@ namespace fayn {
 // RewardEvent. This class handles the rest.
 //
 // Routing modes:
-//   Local  — pure Hebbian: ΔW ∝ pre × post (reward scalar is ignored)
-//   Global — reward-modulated: ΔW ∝ reward × pre × post
+//   Local            — pure Hebbian: ΔW ∝ pre × post (reward ignored, lr always applied)
+//   Global           — reward-modulated: ΔW ∝ reward × pre × post
+//   SupervisedHebbian — uses target_activations (one-hot) as post instead of
+//                       last_output; reward scalar ignored, lr always applied.
+//                       Pulls each class weight row toward hidden reps of that class.
 //
 // Usage:
 //   auto updater = std::make_unique<HebbianUpdater>({{
@@ -36,7 +39,7 @@ namespace fayn {
 // ---------------------------------------------------------------------------
 class HebbianUpdater {
 public:
-    enum class RoutingMode { Local, Global };
+    enum class RoutingMode { Local, Global, SupervisedHebbian };
 
     struct LayerConfig {
         std::shared_ptr<DenseLayer> layer;
@@ -86,12 +89,21 @@ private:
             float effective_lr = cfg.lr;
             if (cfg.mode == RoutingMode::Global)
                 effective_lr *= ev.reward;
+            // Local and SupervisedHebbian always use cfg.lr unchanged.
 
             if (effective_lr == 0.f) continue;
 
+            // SupervisedHebbian: use target_activations (one-hot) as post,
+            // so each class row is pulled toward the hidden reps of that class.
+            const Tensor& post =
+                (cfg.mode == RoutingMode::SupervisedHebbian &&
+                 cfg.layer->has_target_activations())
+                ? cfg.layer->target_activations()
+                : cfg.layer->last_output();
+
             hebbian_update(cfg.layer->weights(),
                            cfg.layer->last_input(),
-                           cfg.layer->last_output(),
+                           post,
                            effective_lr, stream);
 
             ++step_counters_[i];

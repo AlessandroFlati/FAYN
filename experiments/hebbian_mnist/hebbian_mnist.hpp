@@ -5,6 +5,7 @@
 #include "src/ops/dense.hpp"
 #include "src/ops/activations.hpp"
 #include "src/ops/hebbian_updater.hpp"
+#include "src/ops/one_hot.hpp"
 #include "src/io/mnist_loader.hpp"
 
 #include <memory>
@@ -17,11 +18,16 @@ namespace fayn {
 //
 // Topology: Dense(784,256,bias) -> ReLU -> Dense(256,10,no bias)
 //
-// Learning rule (reward-modulated Hebbian, no backprop):
-//   After each mini-batch, emit RewardEvent{reward = -cross_entropy}.
-//   HebbianUpdater subscriber applies:
-//     ΔW ∝ reward × post^T @ pre   (Global routing mode)
-//   Rows of W are L2-normalised every `normalize_every` batches.
+// Learning rule (random projection + supervised Hebbian readout, no backprop):
+//   Hidden layer (d0): frozen at Kaiming random init. Random ReLU projections
+//     of the 784-dim input provide adequate discriminative features (~78% acc).
+//     Local Hebbian on d0 is explicitly disabled — it learns PCA-like features
+//     that are less class-discriminative and destabilise the readout.
+//   Readout layer (d1): SupervisedHebbian mode — one-hot targets used as the
+//     post-synaptic signal. Each class weight row is pulled toward the hidden
+//     representations of that class (nearest-centroid learning on the sphere).
+//     ΔW[label_row] ∝ lr × hidden   (other rows unchanged)
+//   d1 rows are L2-normalised every `normalize_every` batches.
 //
 // Configuration:
 //   lr              - Hebbian learning rate (default 0.01)
@@ -46,8 +52,9 @@ private:
     int                           normalize_every_ = 1;
     size_t                        step_            = 0;
 
+    std::shared_ptr<DenseLayer>   d0_;     // 784 -> 256, Local Hebbian
+    std::shared_ptr<DenseLayer>   d1_;     // 256 -> 10,  SupervisedHebbian
     std::unique_ptr<HebbianUpdater> updater_;
-    LossFn                          loss_fn_;
 };
 
 } // namespace fayn

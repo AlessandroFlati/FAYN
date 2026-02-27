@@ -5,6 +5,45 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-12] Supervised Hebbian readout achieves 78% on MNIST without backprop
+**Date:** 2026-02-27
+
+`HebbianMnistExperiment` reaches ~78% train accuracy in 5–6 epochs using:
+- **d0** (784→256): frozen Kaiming random projection — no updates. Random ReLU features
+  provide adequate discriminability.
+- **d1** (256→10): `SupervisedHebbian` mode — one-hot class labels used as post-synaptic
+  signal. Each class weight row is pulled toward hidden representations of that class
+  (nearest-centroid learning on the L2-normalised sphere). No backpropagation at any
+  point in the pipeline.
+
+```
+epoch   0  acc=0.3764
+epoch   1  acc=0.6120
+epoch   2  acc=0.7145
+epoch   3  acc=0.7586
+epoch   4  acc=0.7730
+epoch   5  acc=0.7767
+epoch   9  acc=0.7800
+```
+
+**Key negative finding:** Local Hebbian on d0 (unsupervised feature learning) hurts:
+it learns PCA-like features that are less class-discriminative AND continuously shifts
+the representation, making d1's class prototypes chase a moving target. Even at 10×
+lower lr for d0, learning never escapes random chance.
+
+**What is now possible:** Backprop-free learning is demonstrated at a meaningful
+accuracy level. `RoutingMode::SupervisedHebbian` and `one_hot_encode()` are production-ready.
+The next frontier is making d0 features class-discriminative without labels (e.g., using
+perturbation-based credit, contrastive Hebbian, or BCM rule).
+
+**New infrastructure:**
+- `src/ops/one_hot.hpp/cu` — `one_hot_encode(labels, C)` CUDA kernel
+- `src/ops/dense.hpp` — `set_target_activations()` / `has_target_activations()` / `target_activations()`
+- `src/ops/hebbian_updater.hpp` — `RoutingMode::SupervisedHebbian`
+- 2 new smoke tests (12 total, all pass): `one_hot_encode`, `supervised_hebbian`
+
+---
+
 ## [CP-11] HebbianMnistExperiment runs end-to-end on MNIST
 **Date:** 2026-02-27
 

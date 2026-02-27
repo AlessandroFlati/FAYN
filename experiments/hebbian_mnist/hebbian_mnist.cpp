@@ -23,35 +23,35 @@ HebbianMnistExperiment::HebbianMnistExperiment(
 {}
 
 // ---------------------------------------------------------------------------
-// setup: build the graph and wire up the reward-modulated Hebbian updater.
+// setup: build the graph and wire up the two-stage local Hebbian updater.
 // ---------------------------------------------------------------------------
 void HebbianMnistExperiment::setup() {
     graph_ = std::make_unique<Graph>();
 
-    // Node 0: Dense 784 -> 256
-    auto d0 = std::make_shared<DenseLayer>(784, 256, /*bias=*/true);
-    d0->set_cache_activations(true);
-    graph_->add_node(d0);
+    // Node 0: Dense 784 -> 256 (Local Hebbian — unsupervised feature learning)
+    d0_ = std::make_shared<DenseLayer>(784, 256, /*bias=*/true);
+    d0_->set_cache_activations(true);
+    graph_->add_node(d0_);
 
     // Node 1: ReLU
     graph_->add_node(make_activation_layer(ActivationType::ReLU));
 
-    // Node 2: Dense 256 -> 10
-    auto d1 = std::make_shared<DenseLayer>(256, 10, /*bias=*/false);
-    d1->set_cache_activations(true);
-    int n2 = graph_->add_node(d1);
+    // Node 2: Dense 256 -> 10 (SupervisedHebbian — target one-hot as post)
+    d1_ = std::make_shared<DenseLayer>(256, 10, /*bias=*/false);
+    d1_->set_cache_activations(true);
+    int n2 = graph_->add_node(d1_);
 
     graph_->add_edge(0, 1);
     graph_->add_edge(1, n2);
 
-    // Reward-modulated Hebbian updater: subscribes to RewardEvent (sync),
-    // applies ΔW ∝ reward × post^T @ pre for both dense layers.
+    // d0: frozen — Kaiming random features are stable and discriminative enough.
+    //     Local Hebbian on d0 hurts because it learns input PCA features (not
+    //     class-discriminative) and destabilises d1's class prototypes.
+    // d1: SupervisedHebbian — one-hot targets as post; learns class prototypes
+    //     over the fixed random projection from d0.
     updater_ = std::make_unique<HebbianUpdater>(std::vector<HebbianUpdater::LayerConfig>{
-        { d0, lr_, HebbianUpdater::RoutingMode::Global, /*normalize=*/true, normalize_every_ },
-        { d1, lr_, HebbianUpdater::RoutingMode::Global, /*normalize=*/true, normalize_every_ },
+        { d1_, lr_, HebbianUpdater::RoutingMode::SupervisedHebbian, /*normalize=*/true, normalize_every_ },
     });
-
-    loss_fn_ = fayn::cross_entropy;
 
     // Data source.
     data_ = std::make_unique<MnistLoader>(
@@ -81,15 +81,18 @@ float HebbianMnistExperiment::run_epoch(size_t epoch) {
         if (outputs.empty())
             throw std::runtime_error("HebbianMnistExperiment: graph produced no output");
 
-        const float loss = loss_fn_(outputs[0], batch.targets);
-        const float acc  = fayn::accuracy(outputs[0], batch.targets);
+        const float acc = fayn::accuracy(outputs[0], batch.targets);
         total_acc += acc;
 
-        // Emit reward = -loss. The HebbianUpdater subscriber fires synchronously,
-        // applies the weight update, and returns before the next batch begins.
+        // Supervised Hebbian: provide one-hot targets as post-synaptic signal
+        // for the readout layer. The HebbianUpdater will pull each class row of
+        // d1's weights toward the hidden representations of that class.
+        d1_->set_target_activations(one_hot_encode(batch.targets, 10));
+
+        // reward = 1.0: ignored by both Local (d0) and SupervisedHebbian (d1).
         RewardEvent ev;
         ev.step   = step_++;
-        ev.reward = -loss;
+        ev.reward = 1.0f;
         EventBus::instance().emit(ev);
     }
 

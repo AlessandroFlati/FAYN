@@ -35,7 +35,7 @@ LD_LIBRARY_PATH="/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH" \
   ./build-linux/tools/fayn_smoke
 ```
 
-All 10 tests must pass before committing. If output is missing due to buffering,
+All 12 tests must pass before committing. If output is missing due to buffering,
 prefix with `stdbuf -oL -eL`.
 
 ### Windows MSVC build (secondary)

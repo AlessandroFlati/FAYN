@@ -6,6 +6,7 @@
 #include "src/ops/dense.hpp"
 #include "src/ops/hebbian.hpp"
 #include "src/ops/hebbian_updater.hpp"
+#include "src/ops/one_hot.hpp"
 #include "src/stats/activation_stats.hpp"
 #include "src/stats/event_bus.hpp"
 #include "src/stats/events.hpp"
@@ -388,6 +389,109 @@ static void test_hebbian_updater_fires() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 11: one_hot_encode — correct one-hot matrix on GPU
+// ---------------------------------------------------------------------------
+static void test_one_hot_encode() {
+    const char* TEST = "one_hot_encode";
+
+    // Labels [0, 2, 1, 3] → one-hot [4, 4]
+    const size_t BATCH = 4, C = 4;
+    int32_t lbl_h[BATCH] = {0, 2, 1, 3};
+
+    fayn::Tensor labels = fayn::Tensor::make({BATCH}, fayn::DType::Int32, fayn::Device::CUDA);
+    FAYN_CUDA_CHECK(cudaMemcpy(labels.data, lbl_h, BATCH * sizeof(int32_t),
+                               cudaMemcpyHostToDevice));
+
+    fayn::Tensor oh = fayn::one_hot_encode(labels, C);
+    FAYN_CUDA_CHECK(cudaDeviceSynchronize());
+
+    if (oh.shape.size() != 2 || oh.shape[0] != BATCH || oh.shape[1] != C)
+        FAIL(TEST, "output shape wrong");
+    if (oh.dtype  != fayn::DType::BFloat16) FAIL(TEST, "output dtype wrong");
+    if (oh.device != fayn::Device::CUDA)    FAIL(TEST, "output not on CUDA");
+
+    std::vector<uint16_t> oh_h(BATCH * C);
+    FAYN_CUDA_CHECK(cudaMemcpy(oh_h.data(), oh.data, BATCH * C * 2,
+                               cudaMemcpyDeviceToHost));
+
+    for (size_t i = 0; i < BATCH; ++i) {
+        for (size_t j = 0; j < C; ++j) {
+            float got      = bf16_bits_to_f32(oh_h[i * C + j]);
+            float expected = (j == static_cast<size_t>(lbl_h[i])) ? 1.0f : 0.0f;
+            if (std::abs(got - expected) > 0.01f)
+                FAIL(TEST, "one-hot value mismatch");
+        }
+    }
+
+    PASS(TEST);
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: SupervisedHebbian — readout row for correct class must move toward
+//          the hidden representation after one update.
+// ---------------------------------------------------------------------------
+static void test_supervised_hebbian() {
+    const char* TEST = "supervised_hebbian";
+
+    // Small network: IN=32, OUT=4 (4 classes).
+    const size_t BATCH = 16, IN = 32, OUT = 4;
+
+    auto layer = std::make_shared<fayn::DenseLayer>(IN, OUT, /*use_bias=*/false);
+    layer->set_cache_activations(true);
+    layer->set_id(0);
+
+    // Forward pass: all-ones input.
+    fayn::Tensor x = fayn::Tensor::make({BATCH, IN}, fayn::DType::BFloat16, fayn::Device::CUDA);
+    {
+        const uint16_t one = f32_to_bf16_bits(1.0f);
+        std::vector<uint16_t> host(BATCH * IN, one);
+        FAYN_CUDA_CHECK(cudaMemcpy(x.data, host.data(), BATCH * IN * 2, cudaMemcpyHostToDevice));
+    }
+    layer->forward(x);
+
+    // Snapshot weights before update.
+    const size_t W_N = OUT * IN;
+    std::vector<uint16_t> before(W_N), after_w(W_N);
+    FAYN_CUDA_CHECK(cudaMemcpy(before.data(), layer->weights().data,
+                               W_N * 2, cudaMemcpyDeviceToHost));
+
+    // One-hot targets: all samples assigned to class 0.
+    int32_t lbl_h[BATCH];
+    for (size_t i = 0; i < BATCH; ++i) lbl_h[i] = 0;
+    fayn::Tensor labels = fayn::Tensor::make({BATCH}, fayn::DType::Int32, fayn::Device::CUDA);
+    FAYN_CUDA_CHECK(cudaMemcpy(labels.data, lbl_h, BATCH * sizeof(int32_t),
+                               cudaMemcpyHostToDevice));
+    layer->set_target_activations(fayn::one_hot_encode(labels, OUT));
+
+    // Updater with SupervisedHebbian, no normalization.
+    fayn::HebbianUpdater updater({{layer, /*lr=*/0.1f,
+                                   fayn::HebbianUpdater::RoutingMode::SupervisedHebbian,
+                                   /*normalize=*/false}});
+    fayn::RewardEvent ev;
+    ev.step = 0; ev.reward = 1.0f;
+    fayn::EventBus::instance().emit(ev);
+
+    FAYN_CUDA_CHECK(cudaMemcpy(after_w.data(), layer->weights().data,
+                               W_N * 2, cudaMemcpyDeviceToHost));
+
+    // Row 0 (correct class) must change; rows 1-3 must be unchanged
+    // (one-hot for class 0 → post for rows 1-3 is 0).
+    bool row0_changed = false;
+    for (size_t j = 0; j < IN; ++j)
+        if (before[j] != after_w[j]) { row0_changed = true; break; }
+
+    bool other_rows_changed = false;
+    for (size_t i = 1; i < OUT; ++i)
+        for (size_t j = 0; j < IN; ++j)
+            if (before[i * IN + j] != after_w[i * IN + j]) { other_rows_changed = true; break; }
+
+    if (!row0_changed)       FAIL(TEST, "correct-class row did not change");
+    if (other_rows_changed)  FAIL(TEST, "wrong-class rows changed (should be zero update)");
+
+    PASS(TEST);
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main() {
@@ -405,6 +509,8 @@ int main() {
     test_graph_forward_mlp();
     test_loss_cross_entropy();
     test_hebbian_updater_fires();
+    test_one_hot_encode();
+    test_supervised_hebbian();
 
     std::cout << "=== All tests passed ===\n";
     return 0;

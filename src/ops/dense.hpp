@@ -48,6 +48,14 @@ public:
     const Tensor& last_input()         const { return last_input_; }
     const Tensor& last_output()        const { return last_output_; }
 
+    // Target activations for supervised Hebbian.
+    // Set to a one-hot BF16 tensor [batch, out_features] before emitting
+    // the RewardEvent; HebbianUpdater::SupervisedHebbian uses this as the
+    // post-synaptic signal instead of the actual forward-pass output.
+    void          set_target_activations(Tensor t) noexcept { target_activations_ = std::move(t); }
+    bool          has_target_activations() const noexcept   { return target_activations_.data != nullptr; }
+    const Tensor& target_activations()     const            { return target_activations_; }
+
     // Access per-layer stats (EMA state, dead ratio, etc.).
     const LayerStats& stats() const { return layer_stats_; }
 
@@ -71,6 +79,7 @@ private:
     bool       cache_activations_ = false;
     Tensor     last_input_;
     Tensor     last_output_;
+    Tensor     target_activations_;  // [batch, out_features] BF16, device (optional)
 };
 
 // ---------------------------------------------------------------------------
