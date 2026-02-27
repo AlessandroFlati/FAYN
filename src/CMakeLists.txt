@@ -1,0 +1,6 @@
+add_subdirectory(core)
+add_subdirectory(stats)
+add_subdirectory(cuda)
+add_subdirectory(ops)
+add_subdirectory(topology)
+add_subdirectory(io)

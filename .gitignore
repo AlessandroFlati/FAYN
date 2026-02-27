@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+build-linux/
+build-windows/
+
+# Scratch / log files
+smoke_out.txt
+*.log
+*.jsonl
+
+# Downloaded packages
+*.deb
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# CMake user-specific
+CMakeUserPresets.json
+
+# Python cache
+__pycache__/
+*.pyc
