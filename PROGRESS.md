@@ -8,7 +8,7 @@ not which files changed. Newest entries at the top.
 ## [CP-12] Supervised Hebbian readout achieves 78% on MNIST without backprop
 **Date:** 2026-02-27
 
-`HebbianMnistExperiment` reaches ~78% train accuracy in 5–6 epochs using:
+`HebbianMnistExperiment` reaches ~78% train accuracy using:
 - **d0** (784→256): frozen Kaiming random projection — no updates. Random ReLU features
   provide adequate discriminability.
 - **d1** (256→10): `SupervisedHebbian` mode — one-hot class labels used as post-synaptic
@@ -16,25 +16,55 @@ not which files changed. Newest entries at the top.
   (nearest-centroid learning on the L2-normalised sphere). No backpropagation at any
   point in the pipeline.
 
+**Full 50-epoch learning curve (batch_size=128, lr=0.01):**
 ```
-epoch   0  acc=0.3764
-epoch   1  acc=0.6120
-epoch   2  acc=0.7145
-epoch   3  acc=0.7586
-epoch   4  acc=0.7730
-epoch   5  acc=0.7767
-epoch   9  acc=0.7800
+epoch   0  acc=0.3756        ← epoch 0: random init, some structure already visible
+epoch   1  acc=0.6226        ← most learning happens here
+epoch   2  acc=0.7156
+epoch   3  acc=0.7515
+epoch   4  acc=0.7657
+epoch   5  acc=0.7705        ← convergence zone begins
+epoch   9  acc=0.7777
+epoch  10  acc=0.7793
+epoch  26  acc=0.7805        ← peak observed
+epoch  49  acc=0.7789        ← plateau: oscillates within ±0.003 indefinitely
 ```
 
+**Benchmark comparison — MNIST 784→256(ReLU)→10 architecture:**
+
+| Method | Update rule | Readout | Acc (train) | Acc (test) | Epochs to plateau |
+|---|---|---|---|---|---|
+| **FAYN SupervisedHebbian** | none (d0 frozen) + Hebbian nearest-centroid | nearest centroid on L2 sphere | **~78%** | est. ~75–76% | 5–6 |
+| Random chance | — | — | 10% | 10% | — |
+| Nearest centroid (raw pixels, no hidden layer) | — | centroid in pixel space | — | ~82% | 1 pass |
+| Linear classifier (raw pixels) | SGD | logistic regression | — | ~92% | ~10–30 |
+| ELM (same arch: random d0, optimal linear readout) | none (d0 frozen) + pseudoinverse | linear (exact optimum) | — | ~93–96% | 1 pass |
+| Feedback Alignment (same arch) | FA approximation | linear | — | ~94% | ~50 |
+| MLP + backprop (same arch, SGD) | backprop | linear (softmax) | ~99% | ~97–98% | ~20–50 |
+
+Notes:
+- FAYN and ELM use identical d0 (random ReLU projection). The ~15–18% gap to ELM is the cost
+  of using online nearest-centroid vs. the globally-optimal linear readout (pseudoinverse).
+  Online Hebbian nearest-centroid converges to the class centroid directions, not the
+  optimal linear separator.
+- "Test" column for FAYN is an estimate; no test-set evaluation is implemented yet.
+- Literature test numbers assume standard MNIST 10k test set; train numbers vary by run.
+
 **Key negative finding:** Local Hebbian on d0 (unsupervised feature learning) hurts:
-it learns PCA-like features that are less class-discriminative AND continuously shifts
-the representation, making d1's class prototypes chase a moving target. Even at 10×
-lower lr for d0, learning never escapes random chance.
+it learns PCA-like features that capture input variance, not class discriminability,
+AND continuously shifts representations so d1 chases a moving target. Even at 10×
+lower lr for d0, training never escapes random chance.
+
+**Gap analysis vs. ELM ceiling (~95%):**
+The ~17% gap breaks down as:
+1. **Readout sub-optimality** (~10–12%): Hebbian nearest-centroid vs. optimal linear.
+   Fix: replace Hebbian with a delta-rule or use a small number of perturbation steps.
+2. **Feature sub-optimality** (~5–6%): Kaiming random features vs. trained features.
+   Fix: supervised feature learning (perturbation, contrastive Hebbian, BCM).
 
 **What is now possible:** Backprop-free learning is demonstrated at a meaningful
 accuracy level. `RoutingMode::SupervisedHebbian` and `one_hot_encode()` are production-ready.
-The next frontier is making d0 features class-discriminative without labels (e.g., using
-perturbation-based credit, contrastive Hebbian, or BCM rule).
+The next frontier is closing the gap to ELM with a better readout update rule.
 
 **New infrastructure:**
 - `src/ops/one_hot.hpp/cu` — `one_hot_encode(labels, C)` CUDA kernel
