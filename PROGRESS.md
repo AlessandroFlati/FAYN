@@ -5,6 +5,55 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-18] Width 256 → 2048: ELM jumps to 95.6%, Hebbian stalls at 82%
+**Date:** 2026-02-27 21:01 UTC
+
+Added `hidden_dim` parameter (default 256) to all three experiment classes
+(`HebbianMnistExperiment`, `EnsembleHebbianMnistExperiment`, `ELMEnsembleExperiment`).
+Removed all hardcoded `256`s from setup() and `elm_fit()`. Registered five new
+`*_2048` variants; commented out and marked FAILED the three weight-decay experiments.
+
+**Full results across all meaningful experiments:**
+
+| Experiment | hidden | init_scale | Method | Acc |
+|---|---|---|---|---|
+| `hebbian_mnist`            | 256  | 1.0  | Hebbian | ~78% |
+| `ensemble_mnist`           | 256  | 1.0  | Hebbian | ~79% |
+| `ensemble_mnist_scaled`    | 256  | 19.8 | Hebbian | 81.4% |
+| `elm_ensemble`             | 256  | 1.0  | ELM     | ~80% |
+| `elm_ensemble_scaled`      | 256  | 19.8 | ELM     | 86.3% |
+| `hebbian_mnist_2048`       | 2048 | 1.0  | Hebbian | ~81.6% |
+| `ensemble_mnist_2048`      | 2048 | 1.0  | Hebbian | **82.1%** |
+| `ensemble_mnist_scaled_2048` | 2048 | 19.8 | Hebbian | 81.4% |
+| `elm_ensemble_2048`        | 2048 | 1.0  | ELM     | **95.4%** |
+| `elm_ensemble_scaled_2048` | 2048 | 19.8 | ELM     | **95.6%** |
+
+**Key findings:**
+
+1. **ELM gains +9% from width**: 86.3% → 95.6%. Near the theoretical random-
+   feature kernel ceiling for 2048 neurons on MNIST. The normal-equations solve
+   correctly accounts for the larger, more correlated feature covariance at 2048h.
+
+2. **Hebbian barely benefits**: 81.4% → 82.1% (+0.7%). Row-norm cosine
+   classification finds the normalised class centroid regardless of width.
+   In 2048-dim space, the ELM correction for feature covariance matters much
+   more — hence the gap grew from ~5% to **~13%**.
+
+3. **Large init scale reverses benefit for Hebbian at 2048h**:
+   `ensemble_mnist_scaled_2048` (81.4%) is slightly *worse* than
+   `ensemble_mnist_2048` (82.1%). At 256h, large scale was needed to activate
+   enough neurons; at 2048h, Kaiming already provides sufficient feature
+   diversity. Large scale creates over-correlated features that hurt the cosine
+   classifier. ELM is unaffected (95.4% → 95.6%) because it corrects for
+   covariance explicitly.
+
+4. **Hebbian-ELM gap is structural, not a width issue**: widening from 256 to
+   2048 *widens* the gap (5% → 13%). The cosine readout is fundamentally
+   wrong for correlated features. Closing this gap requires either the delta
+   rule (iterative ELM) or dropping row-norm (BF16-incompatible as shown in CP-17).
+
+---
+
 ## [CP-17] Weight decay fails in BF16; row-norm is precision management, not just regularisation
 **Date:** 2026-02-27 16:12 UTC
 

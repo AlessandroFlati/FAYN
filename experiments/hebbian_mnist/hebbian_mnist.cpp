@@ -15,11 +15,13 @@ HebbianMnistExperiment::HebbianMnistExperiment(
     const ExperimentConfig& cfg,
     const std::string&      mnist_dir,
     float                   lr,
-    int                     normalize_every)
+    int                     normalize_every,
+    int                     hidden_dim)
     : Experiment(cfg)
     , mnist_dir_(mnist_dir)
     , lr_(lr)
     , normalize_every_(normalize_every)
+    , hidden_dim_(hidden_dim)
 {}
 
 // ---------------------------------------------------------------------------
@@ -28,16 +30,16 @@ HebbianMnistExperiment::HebbianMnistExperiment(
 void HebbianMnistExperiment::setup() {
     graph_ = std::make_unique<Graph>();
 
-    // Node 0: Dense 784 -> 256 (Local Hebbian — unsupervised feature learning)
-    d0_ = std::make_shared<DenseLayer>(784, 256, /*bias=*/true);
+    // Node 0: Dense 784 -> hidden_dim_ (frozen random projection)
+    d0_ = std::make_shared<DenseLayer>(784, static_cast<size_t>(hidden_dim_), /*bias=*/true);
     d0_->set_cache_activations(true);
     graph_->add_node(d0_);
 
     // Node 1: ReLU
     graph_->add_node(make_activation_layer(ActivationType::ReLU));
 
-    // Node 2: Dense 256 -> 10 (SupervisedHebbian — target one-hot as post)
-    d1_ = std::make_shared<DenseLayer>(256, 10, /*bias=*/false);
+    // Node 2: Dense hidden_dim_ -> 10 (SupervisedHebbian — target one-hot as post)
+    d1_ = std::make_shared<DenseLayer>(static_cast<size_t>(hidden_dim_), 10, /*bias=*/false);
     d1_->set_cache_activations(true);
     int n2 = graph_->add_node(d1_);
 

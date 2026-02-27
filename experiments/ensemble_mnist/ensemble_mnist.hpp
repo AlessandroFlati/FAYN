@@ -53,7 +53,8 @@ public:
         bool                    normalize_pre   = false,
         float                   lr_final        = -1.f,
         bool                    row_normalize   = true,
-        float                   weight_decay    = 0.f);
+        float                   weight_decay    = 0.f,
+        int                     hidden_dim      = 256);
 
 protected:
     void  setup()                  override;
@@ -77,6 +78,7 @@ private:
     float                lr_final_        = -1.f;
     bool                 row_normalize_   = true;
     float                weight_decay_    = 0.f;
+    int                  hidden_dim_      = 256;
     size_t               step_            = 0;
 
     std::vector<Member>  members_;
@@ -104,7 +106,8 @@ public:
         const std::string& mnist_dir  = "data/mnist",
         int num_networks              = 10,
         float d0_init_scale           = 1.0f,
-        int64_t seed                  = -1);
+        int64_t seed                  = -1,
+        int hidden_dim                = 256);
     ~ELMEnsembleExperiment() override;
 
 protected:
@@ -126,6 +129,7 @@ private:
     int                 num_networks_;
     float               d0_init_scale_;
     int64_t             seed_;
+    int                 hidden_dim_  = 256;
     std::vector<Member> members_;
     bool                fitted_  = false;
     cublasHandle_t      cublas_  = nullptr;

@@ -27,7 +27,8 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     bool                    normalize_pre,
     float                   lr_final,
     bool                    row_normalize,
-    float                   weight_decay)
+    float                   weight_decay,
+    int                     hidden_dim)
     : Experiment(cfg)
     , mnist_dir_(mnist_dir)
     , lr_(lr)
@@ -39,6 +40,7 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     , lr_final_(lr_final)
     , row_normalize_(row_normalize)
     , weight_decay_(weight_decay)
+    , hidden_dim_(hidden_dim)
 {}
 
 // ---------------------------------------------------------------------------
@@ -74,9 +76,9 @@ void EnsembleHebbianMnistExperiment::setup() {
     for (auto& m : members_) {
         m.graph = std::make_unique<Graph>();
 
-        // d0: frozen random projection 784 -> 256.
+        // d0: frozen random projection 784 -> hidden_dim_.
         // Stats disabled: ensemble members don't need live monitoring.
-        m.d0 = std::make_shared<DenseLayer>(784, 256, /*bias=*/true, d0_init_scale_);
+        m.d0 = std::make_shared<DenseLayer>(784, static_cast<size_t>(hidden_dim_), /*bias=*/true, d0_init_scale_);
         m.d0->set_cache_activations(true);
         m.d0->set_compute_stats(false);
         m.graph->add_node(m.d0);
@@ -86,8 +88,8 @@ void EnsembleHebbianMnistExperiment::setup() {
         relu->set_compute_stats(false);
         m.graph->add_node(std::move(relu));
 
-        // d1: readout 256 -> 10, trained with SupervisedHebbian.
-        m.d1 = std::make_shared<DenseLayer>(256, 10, /*bias=*/false);
+        // d1: readout hidden_dim_ -> 10, trained with SupervisedHebbian.
+        m.d1 = std::make_shared<DenseLayer>(static_cast<size_t>(hidden_dim_), 10, /*bias=*/false);
         m.d1->set_cache_activations(true);
         m.d1->set_compute_stats(false);
         const int n2 = m.graph->add_node(m.d1);
@@ -259,12 +261,14 @@ ELMEnsembleExperiment::ELMEnsembleExperiment(
     const std::string& mnist_dir,
     int num_networks,
     float d0_init_scale,
-    int64_t seed)
+    int64_t seed,
+    int hidden_dim)
     : Experiment(cfg)
     , mnist_dir_(mnist_dir)
     , num_networks_(num_networks)
     , d0_init_scale_(d0_init_scale)
     , seed_(seed)
+    , hidden_dim_(hidden_dim)
 {
     FAYN_CUBLAS_CHECK(cublasCreate(&cublas_));
 }
@@ -280,7 +284,7 @@ void ELMEnsembleExperiment::setup() {
     for (auto& m : members_) {
         m.graph = std::make_unique<Graph>();
 
-        m.d0 = std::make_shared<DenseLayer>(784, 256, /*bias=*/true, d0_init_scale_);
+        m.d0 = std::make_shared<DenseLayer>(784, static_cast<size_t>(hidden_dim_), /*bias=*/true, d0_init_scale_);
         m.d0->set_compute_stats(false);
         m.graph->add_node(m.d0);
 
@@ -288,7 +292,7 @@ void ELMEnsembleExperiment::setup() {
         relu->set_compute_stats(false);
         m.graph->add_node(std::move(relu));
 
-        m.d1 = std::make_shared<DenseLayer>(256, 10, /*bias=*/false);
+        m.d1 = std::make_shared<DenseLayer>(static_cast<size_t>(hidden_dim_), 10, /*bias=*/false);
         m.d1->set_compute_stats(false);
         const int n2 = m.graph->add_node(m.d1);
 
@@ -330,7 +334,7 @@ void ELMEnsembleExperiment::elm_fit() {
     // Floor-divide: drop the last partial batch for uniform-size allocation.
     const size_t n_batches = data_->size() / fit_bs;
     const size_t N        = n_batches * fit_bs;
-    const size_t d        = 256;
+    const size_t d        = static_cast<size_t>(hidden_dim_);
     const size_t C        = 10;
 
     // ---- Build T [N, C] one-hot FP32 on device ----

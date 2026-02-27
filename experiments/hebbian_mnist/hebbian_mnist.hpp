@@ -38,9 +38,10 @@ class HebbianMnistExperiment : public Experiment {
 public:
     explicit HebbianMnistExperiment(
         const ExperimentConfig& cfg,
-        const std::string& mnist_dir      = "data/mnist",
-        float              lr             = 0.01f,
-        int                normalize_every = 1);
+        const std::string& mnist_dir       = "data/mnist",
+        float              lr              = 0.01f,
+        int                normalize_every = 1,
+        int                hidden_dim      = 256);
 
 protected:
     void  setup()                  override;
@@ -50,10 +51,11 @@ private:
     std::string                   mnist_dir_;
     float                         lr_              = 0.01f;
     int                           normalize_every_ = 1;
+    int                           hidden_dim_      = 256;
     size_t                        step_            = 0;
 
-    std::shared_ptr<DenseLayer>   d0_;     // 784 -> 256, Local Hebbian
-    std::shared_ptr<DenseLayer>   d1_;     // 256 -> 10,  SupervisedHebbian
+    std::shared_ptr<DenseLayer>   d0_;     // 784 -> hidden_dim_, frozen
+    std::shared_ptr<DenseLayer>   d1_;     // hidden_dim_ -> 10, SupervisedHebbian
     std::unique_ptr<HebbianUpdater> updater_;
 };
 
