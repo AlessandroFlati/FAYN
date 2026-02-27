@@ -21,12 +21,16 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     const std::string&      mnist_dir,
     float                   lr,
     int                     num_networks,
-    int                     normalize_every)
+    int                     normalize_every,
+    float                   d0_init_scale,
+    int64_t                 seed)
     : Experiment(cfg)
     , mnist_dir_(mnist_dir)
     , lr_(lr)
     , num_networks_(num_networks)
     , normalize_every_(normalize_every)
+    , d0_init_scale_(d0_init_scale)
+    , seed_(seed)
 {}
 
 // ---------------------------------------------------------------------------
@@ -34,14 +38,15 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
 // member. Data source is shared across all members (single MNIST loader).
 // ---------------------------------------------------------------------------
 void EnsembleHebbianMnistExperiment::setup() {
+    if (seed_ >= 0) reset_kaiming_seed(static_cast<uint64_t>(seed_));
     members_.resize(static_cast<size_t>(num_networks_));
 
     for (auto& m : members_) {
         m.graph = std::make_unique<Graph>();
 
-        // d0: frozen Kaiming random projection 784 -> 256.
+        // d0: frozen random projection 784 -> 256.
         // Stats disabled: ensemble members don't need live monitoring.
-        m.d0 = std::make_shared<DenseLayer>(784, 256, /*bias=*/true);
+        m.d0 = std::make_shared<DenseLayer>(784, 256, /*bias=*/true, d0_init_scale_);
         m.d0->set_cache_activations(true);
         m.d0->set_compute_stats(false);
         m.graph->add_node(m.d0);
@@ -223,10 +228,14 @@ static void gauss_solve(std::vector<float>& A, std::vector<float>& b, int n, int
 ELMEnsembleExperiment::ELMEnsembleExperiment(
     const ExperimentConfig& cfg,
     const std::string& mnist_dir,
-    int num_networks)
+    int num_networks,
+    float d0_init_scale,
+    int64_t seed)
     : Experiment(cfg)
     , mnist_dir_(mnist_dir)
     , num_networks_(num_networks)
+    , d0_init_scale_(d0_init_scale)
+    , seed_(seed)
 {
     FAYN_CUBLAS_CHECK(cublasCreate(&cublas_));
 }
@@ -236,12 +245,13 @@ ELMEnsembleExperiment::~ELMEnsembleExperiment() {
 }
 
 void ELMEnsembleExperiment::setup() {
+    if (seed_ >= 0) reset_kaiming_seed(static_cast<uint64_t>(seed_));
     members_.resize(static_cast<size_t>(num_networks_));
 
     for (auto& m : members_) {
         m.graph = std::make_unique<Graph>();
 
-        m.d0 = std::make_shared<DenseLayer>(784, 256, /*bias=*/true);
+        m.d0 = std::make_shared<DenseLayer>(784, 256, /*bias=*/true, d0_init_scale_);
         m.d0->set_compute_stats(false);
         m.graph->add_node(m.d0);
 

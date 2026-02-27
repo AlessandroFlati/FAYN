@@ -36,12 +36,16 @@ namespace fayn {
 // ---------------------------------------------------------------------------
 class EnsembleHebbianMnistExperiment : public Experiment {
 public:
+    // seed: if >= 0, resets the global Kaiming seed counter to this value
+    //       before building members — ensures reproducible d0 projections.
     explicit EnsembleHebbianMnistExperiment(
         const ExperimentConfig& cfg,
         const std::string&      mnist_dir       = "data/mnist",
         float                   lr              = 0.01f,
         int                     num_networks    = 10,
-        int                     normalize_every = 1);
+        int                     normalize_every = 1,
+        float                   d0_init_scale   = 1.0f,
+        int64_t                 seed            = -1);
 
 protected:
     void  setup()                  override;
@@ -59,6 +63,8 @@ private:
     float                lr_              = 0.01f;
     int                  num_networks_    = 10;
     int                  normalize_every_ = 1;
+    float                d0_init_scale_   = 1.0f;
+    int64_t              seed_            = -1;
     size_t               step_            = 0;
 
     std::vector<Member>  members_;
@@ -84,7 +90,9 @@ public:
     explicit ELMEnsembleExperiment(
         const ExperimentConfig& cfg,
         const std::string& mnist_dir  = "data/mnist",
-        int num_networks              = 10);
+        int num_networks              = 10,
+        float d0_init_scale           = 1.0f,
+        int64_t seed                  = -1);
     ~ELMEnsembleExperiment() override;
 
 protected:
@@ -104,6 +112,8 @@ private:
 
     std::string         mnist_dir_;
     int                 num_networks_;
+    float               d0_init_scale_;
+    int64_t             seed_;
     std::vector<Member> members_;
     bool                fitted_  = false;
     cublasHandle_t      cublas_  = nullptr;

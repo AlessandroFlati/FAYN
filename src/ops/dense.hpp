@@ -23,7 +23,12 @@ namespace fayn {
 // ---------------------------------------------------------------------------
 class DenseLayer : public Layer {
 public:
-    DenseLayer(size_t in_features, size_t out_features, bool use_bias = true);
+    // init_scale: multiplier on the Kaiming uniform range for the weight
+    // initialisation of this layer.  Default (1.0) is standard Kaiming.
+    // Set > 1 (e.g. sqrt(fan_in/2) ≈ 19.8 for fan_in=784) to approximate
+    // the Uniform(-1,1) initialisation typical in ELM literature.
+    DenseLayer(size_t in_features, size_t out_features,
+               bool use_bias = true, float init_scale = 1.0f);
     ~DenseLayer() override;
 
     Tensor forward(const Tensor& x) override;
@@ -72,6 +77,7 @@ private:
     size_t      in_features_;
     size_t      out_features_;
     bool        use_bias_;
+    float       init_scale_;
     std::string name_;
 
     Tensor weights_;   // BF16, device
@@ -97,5 +103,10 @@ void add_bias_bf16(
     size_t         batch_size,
     size_t         out_features,
     cudaStream_t   stream);
+
+// Reset the global Kaiming seed counter used by DenseLayer::init_weights().
+// Call before building an experiment to ensure reproducible or comparable
+// weight initialisations across separate process invocations.
+void reset_kaiming_seed(uint64_t val = 42);
 
 } // namespace fayn

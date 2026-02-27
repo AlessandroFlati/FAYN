@@ -18,6 +18,36 @@ FAYN_REGISTER_EXPERIMENT("hebbian_mnist",  fayn::HebbianMnistExperiment,        
 FAYN_REGISTER_EXPERIMENT("ensemble_mnist", fayn::EnsembleHebbianMnistExperiment, ensemble_mnist)
 FAYN_REGISTER_EXPERIMENT("elm_ensemble",   fayn::ELMEnsembleExperiment,          elm_ensemble)
 
+// Scaled-init variants: d0 weights drawn from Uniform(-scale, +scale) where
+// scale = sqrt(2/fan_in) * init_scale.  With init_scale ≈ sqrt(fan_in/2) = 19.8
+// the range becomes Uniform(-1, 1), matching standard ELM initialisation.
+// Pre-activation std ≈ 4.9 vs ≈ 0.27 for Kaiming — much more informative features.
+namespace {
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_scaled = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_scaled",
+        [](const fayn::ExperimentConfig& cfg) {
+            constexpr float   kScale = 19.8f;  // sqrt(784/2) → Uniform(-1,1) range
+            constexpr int64_t kSeed  = 42;     // reproducible d0 projections
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/0.01f, /*K=*/10, /*norm_every=*/1,
+                kScale, kSeed);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_elm_ensemble_scaled = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "elm_ensemble_scaled",
+        [](const fayn::ExperimentConfig& cfg) {
+            constexpr float   kScale = 19.8f;
+            constexpr int64_t kSeed  = 42;     // same projections as ensemble_mnist_scaled
+            return std::make_unique<fayn::ELMEnsembleExperiment>(
+                cfg, "data/mnist", /*K=*/10, kScale, kSeed);
+        });
+    return true;
+}();
+}
+
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog << " <experiment_name> [options]\n"
               << "Options:\n"

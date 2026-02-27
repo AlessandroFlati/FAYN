@@ -47,14 +47,16 @@ void add_bias_bf16(
 // ---------------------------------------------------------------------------
 // Weight init: Kaiming uniform in FP32, then cast to BF16 on device.
 // ---------------------------------------------------------------------------
-static void kaiming_uniform_bf16(Tensor& w, size_t fan_in) {
+// Global seed counter: each DenseLayer gets a unique seed so ensemble members
+// get different random projections. reset_kaiming_seed() lets callers fix the
+// starting value for reproducible or comparable runs.
+static std::atomic<uint64_t> seed_counter{42};
+
+static void kaiming_uniform_bf16(Tensor& w, size_t fan_in, float init_scale) {
     // w: [out, in] BF16 on device.
     const size_t n   = w.numel();
-    const float  std = sqrtf(2.0f / static_cast<float>(fan_in));
+    const float  std = sqrtf(2.0f / static_cast<float>(fan_in)) * init_scale;
 
-    // Each DenseLayer gets a unique seed so ensemble members get different
-    // random projections. Seed sequence starts at 42 and increments atomically.
-    static std::atomic<uint64_t> seed_counter{42};
     const uint64_t seed = seed_counter.fetch_add(1, std::memory_order_relaxed);
 
     // Allocate FP32 on host, fill, then cast on host, upload.
@@ -71,6 +73,10 @@ static void kaiming_uniform_bf16(Tensor& w, size_t fan_in) {
                                n * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
 }
 
+void reset_kaiming_seed(uint64_t val) {
+    seed_counter.store(val, std::memory_order_relaxed);
+}
+
 static void zeros_fp32(Tensor& b) {
     FAYN_CUDA_CHECK(cudaMemset(b.data, 0, b.nbytes()));
 }
@@ -78,10 +84,12 @@ static void zeros_fp32(Tensor& b) {
 // ---------------------------------------------------------------------------
 // DenseLayer
 // ---------------------------------------------------------------------------
-DenseLayer::DenseLayer(size_t in_features, size_t out_features, bool use_bias)
+DenseLayer::DenseLayer(size_t in_features, size_t out_features,
+                       bool use_bias, float init_scale)
     : in_features_(in_features)
     , out_features_(out_features)
     , use_bias_(use_bias)
+    , init_scale_(init_scale)
 {
     FAYN_CUBLAS_CHECK(cublasCreate(&cublas_handle_));
     init_weights();
@@ -93,7 +101,7 @@ DenseLayer::~DenseLayer() {
 
 void DenseLayer::init_weights() {
     weights_ = Tensor::make({out_features_, in_features_}, DType::BFloat16, Device::CUDA);
-    kaiming_uniform_bf16(weights_, in_features_);
+    kaiming_uniform_bf16(weights_, in_features_, init_scale_);
     name_ = "dense";
 
     if (use_bias_) {

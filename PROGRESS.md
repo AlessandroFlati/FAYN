@@ -5,6 +5,44 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-15] Larger init scale reveals ELM gap — 86% vs 81% Hebbian
+**Date:** 2026-02-27
+
+Parameterised d0 random projection init: `init_scale` multiplies the Kaiming
+uniform range (`±sqrt(2/fan_in)`). Two new experiments registered:
+- `ensemble_mnist_scaled` — Hebbian ensemble with `init_scale = 19.8` (≈ Uniform(−1,1))
+- `elm_ensemble_scaled`   — ELM ensemble with `init_scale = 19.8`, same projections
+
+Both variants pin the Kaiming seed counter to 42 via `reset_kaiming_seed(42)` in
+`setup()`, ensuring identical d0 projections for a fair comparison.
+
+**Results (K=10, batch_size=512, seed=42, init_scale=19.8):**
+
+| Method | Epochs | Train acc |
+|---|---|---|
+| ELM ensemble, Kaiming init (CP-14) | 1 | ~78–80% |
+| Hebbian ensemble, Kaiming init (CP-13) | 40 | 79.1% |
+| Hebbian ensemble, scaled init | 40 | **81.4%** |
+| ELM ensemble, scaled init | 1 | **86.3%** |
+
+**Why scaled init helps:**
+Pre-activation std rises from 0.27 (Kaiming) to ~4.9 (scale 19.8).
+Active ReLU features carry much more discriminative signal.
+
+**Why ELM beats Hebbian by +5% with scaled init (but not with Kaiming):**
+With Kaiming features, Hebbian converges to approximately the ELM optimum after
+40 epochs.  With larger features, the Hebbian delta-rule update (`ΔW ∝ (target −
+output) · input`) is 73× larger in magnitude; the iterative optimisation
+oscillates and converges to a suboptimal plateau (~81%) far below the exact
+normal-equations solution (~86%).
+
+**Infrastructure additions:**
+- `DenseLayer(in, out, bias, init_scale=1.0f)` — 4th optional constructor arg
+- `reset_kaiming_seed(uint64_t)` — exposed from `dense.hpp` for reproducibility
+- `seed` parameter on both ensemble experiment constructors
+
+---
+
 ## [CP-14] ELM readout implemented — confirms Hebbian converges to optimal solution
 **Date:** 2026-02-27
 
