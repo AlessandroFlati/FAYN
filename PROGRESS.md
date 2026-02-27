@@ -5,6 +5,55 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-16] Feature normalisation and LR scheduling confirm structural Hebbian–ELM gap
+**Date:** 2026-02-27 14:06 UTC
+
+Added two features to `HebbianUpdater::LayerConfig` and ran four experiments to
+probe whether any learning-rate trick can close the 5% Hebbian–ELM gap:
+
+- `normalize_pre` — L2-normalise each hidden-state vector before the Hebbian
+  outer product, making H^T H ≈ (N/d)·I
+- `lr_schedule`  — `std::function<float(size_t step)>` overrides constant lr;
+  used for cosine annealing from `lr` to `lr_final` over all training steps
+
+**Results (K=10, init_scale=19.8, seed=42):**
+
+| Experiment | lr | Epoch-0 | Epoch-100 |
+|---|---|---|---|
+| `ensemble_mnist_scaled` (baseline) | 0.01 const | 79.5% | 81.4% |
+| `ensemble_mnist_lrs` (cosine 0.1→0.001) | 0.1→0.001 | 79.5% | 81.4% |
+| `ensemble_mnist_normed` (normalize_pre) | 0.01 const | 25.5% | 47%   |
+| `ensemble_mnist_normed_lrs` (both) | 0.1→0.001 | 71.9% | 81.3% |
+| `elm_ensemble_scaled` (ELM, reference) | — | 86.3% | — |
+
+**Key findings:**
+
+1. **LR scheduling gives no improvement.** The Hebbian ensemble converges in
+   epoch 0; it is already at its plateau. Annealing from 0.1→0.001 neither
+   overshoots nor improves.
+
+2. **Feature normalisation doesn't improve accuracy.**
+   The typical ReLU output vector has L2 norm ≈ 84 (init_scale=19.8).
+   Normalising each pre-synaptic vector to unit norm reduces the effective
+   update magnitude by ~84×, causing the lr=0.01 variant to stall at 47%.
+   With lr_start=0.1 (normed_lrs), convergence is recovered (~81%), but
+   accuracy equals the baseline — normalization didn't help.
+
+3. **Root cause — the Hebbian plateau is structural.**
+   `normalize_weights_rows` constrains W to the unit sphere. The Hebbian rule
+   with this constraint finds the *normalised class centroid*:
+   `W[j,:] ∝ mean(h | class_j)`.
+   Normalising the pre-synaptic input doesn't change the direction of this
+   centroid — it only rescales the step size. Both variants converge to the
+   same point on the sphere.
+   ELM finds the *unconstrained least-squares solution*
+   `(H^T H)^{-1} H^T T`, which lies off the sphere and accounts for feature
+   covariance.  To close the ELM gap one must either (a) remove the row
+   normalisation constraint, or (b) switch to a delta rule
+   `ΔW ∝ (target − output) · pre`.
+
+---
+
 ## [CP-15] Larger init scale reveals ELM gap — 86% vs 81% Hebbian
 **Date:** 2026-02-27
 

@@ -49,9 +49,15 @@ void HebbianMnistExperiment::setup() {
     //     class-discriminative) and destabilises d1's class prototypes.
     // d1: SupervisedHebbian — one-hot targets as post; learns class prototypes
     //     over the fixed random projection from d0.
-    updater_ = std::make_unique<HebbianUpdater>(std::vector<HebbianUpdater::LayerConfig>{
-        { d1_, lr_, HebbianUpdater::RoutingMode::SupervisedHebbian, /*normalize=*/true, normalize_every_ },
-    });
+    updater_ = std::make_unique<HebbianUpdater>(std::vector<HebbianUpdater::LayerConfig>{{
+        .layer           = d1_,
+        .lr              = lr_,
+        .mode            = HebbianUpdater::RoutingMode::SupervisedHebbian,
+        .normalize       = true,
+        .normalize_every = normalize_every_,
+        .normalize_pre   = false,
+        .lr_schedule     = {},
+    }});
 
     // Data source.
     data_ = std::make_unique<MnistLoader>(

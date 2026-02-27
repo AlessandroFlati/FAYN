@@ -6,6 +6,7 @@
 #include "../stats/events.hpp"
 #include "../cuda/stream_pool.hpp"
 
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -42,11 +43,18 @@ public:
     enum class RoutingMode { Local, Global, SupervisedHebbian };
 
     struct LayerConfig {
-        std::shared_ptr<DenseLayer> layer;
-        float       lr              = 0.01f;
-        RoutingMode mode            = RoutingMode::Global;
-        bool        normalize       = true;
-        int         normalize_every = 1;
+        std::shared_ptr<DenseLayer>   layer;
+        float                         lr              = 0.01f;
+        RoutingMode                   mode            = RoutingMode::Global;
+        bool                          normalize       = true;
+        int                           normalize_every = 1;
+        // L2-normalise each pre-synaptic feature vector before the outer
+        // product. Makes H^T H ≈ (N/d)·I, so the Hebbian direction better
+        // approximates the ELM solution (H^T H)^{-1} H^T T.
+        bool                          normalize_pre   = false;
+        // Optional per-step LR schedule. If set, called with ev.step and its
+        // return value replaces cfg.lr. Useful for cosine/linear annealing.
+        std::function<float(size_t)>  lr_schedule;
     };
 
     explicit HebbianUpdater(std::vector<LayerConfig> layers)
@@ -86,10 +94,11 @@ private:
             // Skip if no forward pass has been done yet.
             if (cfg.layer->last_input().data == nullptr) continue;
 
-            float effective_lr = cfg.lr;
+            // LR: use schedule if provided, else constant cfg.lr.
+            float effective_lr = cfg.lr_schedule ? cfg.lr_schedule(ev.step) : cfg.lr;
             if (cfg.mode == RoutingMode::Global)
                 effective_lr *= ev.reward;
-            // Local and SupervisedHebbian always use cfg.lr unchanged.
+            // Local and SupervisedHebbian always use base lr unchanged.
 
             if (effective_lr == 0.f) continue;
 
@@ -101,8 +110,23 @@ private:
                 ? cfg.layer->target_activations()
                 : cfg.layer->last_output();
 
+            // Pre-synaptic activations: optionally L2-normalise each feature
+            // vector (row) so that H^T H ≈ (N/d)·I, making the Hebbian
+            // update direction a better proxy for the ELM solution.
+            Tensor pre_normed;
+            const Tensor* pre_ptr = &cfg.layer->last_input();
+            if (cfg.normalize_pre) {
+                const Tensor& src = cfg.layer->last_input();
+                pre_normed = Tensor::make(src.shape, src.dtype, Device::CUDA);
+                FAYN_CUDA_CHECK(cudaMemcpyAsync(
+                    pre_normed.data, src.data, src.nbytes(),
+                    cudaMemcpyDeviceToDevice, stream));
+                normalize_weights_rows(pre_normed, 1e-8f, stream);
+                pre_ptr = &pre_normed;
+            }
+
             hebbian_update(cfg.layer->weights(),
-                           cfg.layer->last_input(),
+                           *pre_ptr,
                            post,
                            effective_lr, stream);
 

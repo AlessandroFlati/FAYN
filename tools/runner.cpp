@@ -46,6 +46,50 @@ namespace {
         });
     return true;
 }();
+// Feature-normalised Hebbian: L2-normalise each hidden vector before the
+// outer product — makes H^T H ≈ (N/d)·I, pulling Hebbian toward ELM solution.
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_normed = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_normed",
+        [](const fayn::ExperimentConfig& cfg) {
+            constexpr float   kScale = 19.8f;
+            constexpr int64_t kSeed  = 42;
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/0.01f, /*K=*/10, /*norm_every=*/1,
+                kScale, kSeed, /*normalize_pre=*/true);
+        });
+    return true;
+}();
+// Cosine-annealed LR: start at 0.1, decay to 0.001 over all training steps.
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_lrs = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_lrs",
+        [](const fayn::ExperimentConfig& cfg) {
+            constexpr float   kScale    = 19.8f;
+            constexpr int64_t kSeed     = 42;
+            constexpr float   kLrStart  = 0.1f;
+            constexpr float   kLrFinal  = 0.001f;
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/kLrStart, /*K=*/10, /*norm_every=*/1,
+                kScale, kSeed, /*normalize_pre=*/false, kLrFinal);
+        });
+    return true;
+}();
+// Both: feature normalisation + cosine LR annealing.
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_normed_lrs = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_normed_lrs",
+        [](const fayn::ExperimentConfig& cfg) {
+            constexpr float   kScale    = 19.8f;
+            constexpr int64_t kSeed     = 42;
+            constexpr float   kLrStart  = 0.1f;
+            constexpr float   kLrFinal  = 0.001f;
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/kLrStart, /*K=*/10, /*norm_every=*/1,
+                kScale, kSeed, /*normalize_pre=*/true, kLrFinal);
+        });
+    return true;
+}();
 }
 
 static void print_usage(const char* prog) {

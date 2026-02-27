@@ -23,7 +23,9 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     int                     num_networks,
     int                     normalize_every,
     float                   d0_init_scale,
-    int64_t                 seed)
+    int64_t                 seed,
+    bool                    normalize_pre,
+    float                   lr_final)
     : Experiment(cfg)
     , mnist_dir_(mnist_dir)
     , lr_(lr)
@@ -31,6 +33,8 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     , normalize_every_(normalize_every)
     , d0_init_scale_(d0_init_scale)
     , seed_(seed)
+    , normalize_pre_(normalize_pre)
+    , lr_final_(lr_final)
 {}
 
 // ---------------------------------------------------------------------------
@@ -39,6 +43,28 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
 // ---------------------------------------------------------------------------
 void EnsembleHebbianMnistExperiment::setup() {
     if (seed_ >= 0) reset_kaiming_seed(static_cast<uint64_t>(seed_));
+
+    // Build data source first so we can compute total_steps for LR schedule.
+    data_ = std::make_unique<MnistLoader>(
+        mnist_dir_ + "/train-images-idx3-ubyte",
+        mnist_dir_ + "/train-labels-idx1-ubyte");
+    data_->set_output_device(Device::CUDA);
+    data_->set_input_dtype(DType::BFloat16);
+
+    // Cosine LR schedule: lr(t) = lr0 + (lr1 - lr0) * 0.5 * (1 - cos(pi*t))
+    // t goes from 0 to 1 over total_steps; returns lr0 at t=0, lr1 at t=1.
+    std::function<float(size_t)> lr_sched;
+    if (lr_final_ >= 0.f) {
+        const size_t n_batches   = data_->size() / cfg_.batch_size;
+        const size_t total_steps = cfg_.epochs * n_batches;
+        const float  lr0 = lr_, lr1 = lr_final_;
+        const size_t T   = total_steps > 0 ? total_steps : 1;
+        lr_sched = [lr0, lr1, T](size_t step) -> float {
+            const float t = std::min(static_cast<float>(step) / static_cast<float>(T), 1.f);
+            return lr0 + (lr1 - lr0) * 0.5f * (1.f - std::cos(float(M_PI) * t));
+        };
+    }
+
     members_.resize(static_cast<size_t>(num_networks_));
 
     for (auto& m : members_) {
@@ -65,20 +91,18 @@ void EnsembleHebbianMnistExperiment::setup() {
         m.graph->add_edge(0, 1);
         m.graph->add_edge(1, n2);
 
-        m.updater = std::make_unique<HebbianUpdater>(
-            std::vector<HebbianUpdater::LayerConfig>{{
-                m.d1, lr_,
-                HebbianUpdater::RoutingMode::SupervisedHebbian,
-                /*normalize=*/true, normalize_every_,
-            }});
-    }
+        HebbianUpdater::LayerConfig lcfg;
+        lcfg.layer           = m.d1;
+        lcfg.lr              = lr_;
+        lcfg.mode            = HebbianUpdater::RoutingMode::SupervisedHebbian;
+        lcfg.normalize       = true;
+        lcfg.normalize_every = normalize_every_;
+        lcfg.normalize_pre   = normalize_pre_;
+        lcfg.lr_schedule     = lr_sched;   // empty if no scheduling
 
-    // Single data source shared across members.
-    data_ = std::make_unique<MnistLoader>(
-        mnist_dir_ + "/train-images-idx3-ubyte",
-        mnist_dir_ + "/train-labels-idx1-ubyte");
-    data_->set_output_device(Device::CUDA);
-    data_->set_input_dtype(DType::BFloat16);
+        m.updater = std::make_unique<HebbianUpdater>(
+            std::vector<HebbianUpdater::LayerConfig>{ std::move(lcfg) });
+    }
 }
 
 // ---------------------------------------------------------------------------
