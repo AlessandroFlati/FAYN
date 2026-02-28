@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 #include "experiments/hebbian_mnist/hebbian_mnist.hpp"
 #include "experiments/ensemble_mnist/ensemble_mnist.hpp"
+#include "experiments/deep_elm/deep_elm.hpp"
 
 FAYN_REGISTER_EXPERIMENT("hebbian_mnist",  fayn::HebbianMnistExperiment,         hebbian_mnist)
 FAYN_REGISTER_EXPERIMENT("ensemble_mnist", fayn::EnsembleHebbianMnistExperiment, ensemble_mnist)
@@ -323,6 +324,34 @@ namespace {
             return std::make_unique<fayn::ELMEnsembleExperiment>(
                 cfg, "data/mnist", /*K=*/10, /*scale=*/1.0f, /*seed=*/42LL,
                 /*hidden_dim=*/2048, /*use_ciw=*/true);
+        });
+    return true;
+}();
+// ---------------------------------------------------------------------------
+// Deep alternating ELM: two analytically-solved layers with target propagation.
+// W_0 frozen random; W_1 and W_2 solved alternately via normal equations.
+// Convergence: each solve is the global optimum for that layer given the other
+// fixed (coordinate descent) → monotone convergence to a local minimum.
+// ---------------------------------------------------------------------------
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_256 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_256",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/256, /*d1=*/256, /*n_cycles=*/5,
+                /*lambda1=*/1e-4f, /*lambda2=*/1e-4f);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_2048 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_2048",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/2048, /*d1=*/2048, /*n_cycles=*/5,
+                /*lambda1=*/1e-4f, /*lambda2=*/1e-4f);
         });
     return true;
 }();

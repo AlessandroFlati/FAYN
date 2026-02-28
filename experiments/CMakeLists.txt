@@ -21,3 +21,4 @@ set_target_properties(fayn_experiments PROPERTIES
 
 add_subdirectory(hebbian_mnist)
 add_subdirectory(ensemble_mnist)
+add_subdirectory(deep_elm)

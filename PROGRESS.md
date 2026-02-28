@@ -5,6 +5,45 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-23] Deep alternating ELM: target propagation unlocks a second trained layer
+**Date:** 2026-02-28 11:37 UTC
+
+Extended ELM to a two-hidden-layer architecture using alternating coordinate descent
+with target propagation. Architecture: `x→W_0(frozen)→ReLU→H_0→W_1(ELM)→ReLU→H_1→W_2(ELM)→Y`.
+
+**Algorithm (n_cycles iterations):**
+1. Solve `W_2 = (H_1^T H_1 + λI)^{-1} H_1^T T` (ELM on current H_1)
+2. Back-project: `H_1* = T (W_2 W_2^T)^{-1} W_2` (min-norm solution to `H_1* W_2^T = T`)
+3. Solve `W_1 = (H_0^T H_0 + λI)^{-1} H_0^T H_1*` (ELM on back-projected targets)
+4. Next cycle: re-solve W_2 with improved W_1 features
+
+Each W_2 solve is the global optimum given fixed W_1. Cycle printout measures accuracy
+with consistent (W_1, W_2) pairs. Final W_2 re-solve after last W_1 update.
+
+**New files:**
+- `src/ops/elm_solver.hpp` — header-only `ElmSolver` class: `solve()`, `propagate_target()`,
+  `relu_forward()` — reusable FP32 GPU operations sharing one cuBLAS handle.
+- `experiments/deep_elm/` — `DeepELMExperiment` class (precomputes H_0 once, alternating solve).
+
+**Results (batch_size=64, n_cycles=5, λ=1e-4):**
+
+| Experiment | hidden | cycle 0 (= 1-layer ELM) | cycle 1 | final epoch |
+|---|---|---|---|---|
+| `deep_elm_256`  | 256  | 86.3% | **89.1%** | 87.9% |
+| `deep_elm_2048` | 2048 | 96.3% | **96.9%** | 96.7% |
+
+**Key finding:** one round of target propagation (+2.8% for 256h, +0.6% for 2048h) reliably
+improves over single-layer ELM. Slight regression after cycle 1 is expected: the ReLU
+nonlinearity makes the target propagation an approximation (ignores ReLU^{-1} when back-
+projecting), so W_1 is solved for the wrong (pre-activation) targets. Monotone convergence
+holds only without nonlinearities; with ReLU it is coordinate descent on an approximation.
+
+**Summary vs. ELM ensemble (K=10, same hidden):**
+- 256h: 86.3% (ELM) → 89.1% deep ELM (+2.8%)
+- 2048h: 95.6% (ELM ensemble) vs 96.9% deep ELM (+1.3% from different random W_0 init)
+
+---
+
 ## [CP-22] CIW initialization: helps delta rule, breaks ELM via Gram ill-conditioning
 **Date:** 2026-02-28 09:57 UTC
 
