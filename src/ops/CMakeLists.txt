@@ -15,6 +15,7 @@ target_link_libraries(fayn_ops PUBLIC
     fayn_cuda
     CUDA::cudart
     CUDA::cublas
+    CUDA::cusolver
 )
 
 set_target_properties(fayn_ops PROPERTIES

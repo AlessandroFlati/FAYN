@@ -339,8 +339,43 @@ namespace {
         [](const fayn::ExperimentConfig& cfg) {
             return std::make_unique<fayn::DeepELMExperiment>(
                 cfg, "data/mnist",
-                /*d0=*/256, /*d1=*/256, /*n_cycles=*/5,
-                /*lambda1=*/1e-4f, /*lambda2=*/1e-4f);
+                /*d0=*/256, /*d=*/256, /*n_hidden=*/1, /*n_cycles=*/20,
+                /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_800 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_800",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/800, /*d=*/800, /*n_hidden=*/1, /*n_cycles=*/20,
+                /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+// Wide random projection (8192) compressed into a 800-dim ELM hidden layer.
+// Isolates the effect of random feature width from learned representation width.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_8192_800 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_8192_800",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/8192, /*d=*/800, /*n_hidden=*/1, /*n_cycles=*/20,
+                /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_32k_800 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_32k_800",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/32768, /*d=*/800, /*n_hidden=*/1, /*n_cycles=*/20,
+                /*lambda=*/1e-4f);
         });
     return true;
 }();
@@ -350,8 +385,82 @@ namespace {
         [](const fayn::ExperimentConfig& cfg) {
             return std::make_unique<fayn::DeepELMExperiment>(
                 cfg, "data/mnist",
-                /*d0=*/2048, /*d1=*/2048, /*n_cycles=*/5,
-                /*lambda1=*/1e-4f, /*lambda2=*/1e-4f);
+                /*d0=*/2048, /*d=*/2048, /*n_hidden=*/1, /*n_cycles=*/5,
+                /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+// ---------------------------------------------------------------------------
+// Hybrid ELM+gradient experiments: re-solve readout analytically each epoch
+// and apply one full-batch gradient step on each hidden layer (delta-rule
+// using propagated targets).
+// ---------------------------------------------------------------------------
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_hebb_256 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_hebb_256",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::HybridElmHebbianExperiment>(
+                cfg, "data/mnist", /*d0=*/256, /*d=*/256, /*n_hidden=*/1,
+                /*lambda2=*/1e-4f, /*lr_w=*/0.1f, /*elm_init=*/false);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_init_hebb_256 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_init_hebb_256",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::HybridElmHebbianExperiment>(
+                cfg, "data/mnist", /*d0=*/256, /*d=*/256, /*n_hidden=*/1,
+                /*lambda2=*/1e-4f, /*lr_w=*/0.1f, /*elm_init=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_init_hebb_2048 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_init_hebb_2048",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::HybridElmHebbianExperiment>(
+                cfg, "data/mnist", /*d0=*/2048, /*d=*/2048, /*n_hidden=*/1,
+                /*lambda2=*/1e-4f, /*lr_w=*/0.1f, /*elm_init=*/true);
+        });
+    return true;
+}();
+// Lower lr for 2048-dim: 0.1 overshoots the ELM warm-start drastically.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_init_hebb_2048_lr01 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_init_hebb_2048_lr01",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::HybridElmHebbianExperiment>(
+                cfg, "data/mnist", /*d0=*/2048, /*d=*/2048, /*n_hidden=*/1,
+                /*lambda2=*/1e-4f, /*lr_w=*/0.01f, /*elm_init=*/true);
+        });
+    return true;
+}();
+// ---------------------------------------------------------------------------
+// N-layer experiments at d=4096: 2 hidden ELM layers + readout (3 trained
+// layers total). cuSOLVER handles d=4096 solves without CPU round-trips.
+// ---------------------------------------------------------------------------
+// Pure alternating ELM: 5 cycles on epoch 0, then fixed network.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_4096_L3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_4096_L3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+// ELM warm-start on epoch 0, then gradient steps on both hidden layers.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_init_hebb_4096_L3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_init_hebb_4096_L3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::HybridElmHebbianExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/2,
+                /*lambda2=*/1e-4f, /*lr_w=*/0.01f, /*elm_init=*/true);
         });
     return true;
 }();

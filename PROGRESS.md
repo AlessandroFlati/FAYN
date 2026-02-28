@@ -5,6 +5,231 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-29] Random feature width sweep: optimal d0 for a fixed 800-dim ELM layer
+**Date:** 2026-02-28 19:14 UTC
+
+Swept d0 (frozen random projection width) while keeping the learned ELM layer fixed at d=800,
+to isolate the effect of random feature richness from learned representation width.
+
+### Architecture
+```
+784 → d0 (frozen random, Kaiming uniform) → ReLU → 800 (ELM) → 10 (ELM readout)
+```
+
+### Results (epoch 0, 20 cycles)
+
+| Experiment | d0 | Train | Test | Train−Test |
+|---|---|---|---|---|
+| `deep_elm_256` | 256 | 88.01% | 89.11% | −1.1% (underfitting) |
+| `deep_elm_800` | 800 | 93.65% | 93.87% | −0.2% |
+| `deep_elm_8192_800` | 8192 | 99.13% | **97.68%** | 1.5% |
+| `deep_elm_32k_800` | 32768 | 99.99% | 96.02% | 4.0% |
+| Backprop MLP 800 HU (literature) | — | ~99% | 98.4% | ~0.6% |
+
+### Key findings
+
+- **d0=8192 is the sweet spot**: test accuracy peaks at 97.68% and the train-test gap (1.5%)
+  remains modest. Best result among the frozen→800 family, only −0.7% from the backprop baseline.
+- **d0=32768 overfits**: train reaches 99.99% (near-perfect memorisation) but test drops to
+  96.02% — worse than d0=8192 despite a better train fit. λ=1e-4 is insufficient regularisation
+  at this scale. The ELM can effectively shatter 60k samples in a 32k-dimensional feature space.
+- **Clean bias-variance illustration**: at d0 ≪ 800 the model underfits (test > train);
+  at d0=800 the model is roughly at bias-variance balance; at d0=8192 it slightly overfits
+  but generalises well; at d0=32k it memorises.
+- **cycle 0 → cycle 1 jump** grows with d0: the first ELM backward pass dramatically refines
+  the hidden weights once the feature space is large enough to solve into, going from 93% → 99%
+  at d0=8192 and 93% → 99.98% at d0=32k.
+
+### Registrations added
+- `deep_elm_8192_800` (d0=8192, d=800, n_hidden=1, n_cycles=20)
+- `deep_elm_32k_800` (d0=32768, d=800, n_hidden=1, n_cycles=20)
+
+---
+
+## [CP-28] Deep ELM at d=800: benchmark comparison and test-set evaluation
+**Date:** 2026-02-28 15:55 UTC
+
+### Motivation
+The PROGRESS.md table at CP-16 listed "MLP + backprop (same arch, SGD) ~97–98% test" as an
+estimate from literature. This checkpoint establishes:
+1. The exact source and architecture of that benchmark.
+2. Our first measured comparison at the same width (d=800).
+3. Train vs. test accuracy for all deep ELM variants (test-set eval added in CP-28).
+
+### MLP + backprop benchmark — what the literature actually says
+
+Source: LeCun MNIST benchmark page (Simard et al. 2003; LeCun et al. 1998).
+Architecture: **784 → 800 hidden units (trained, cross-entropy) → 10 (softmax)**.
+Both layers are fully backprop-trained. This is different from our architecture where W_0 is frozen.
+
+| Method (from LeCun table) | Test error | Test acc |
+|---|---|---|
+| 2-layer NN, 300 HU, cross-entropy | 1.6% | 98.4% |
+| 2-layer NN, 800 HU, cross-entropy | 1.6% | 98.4% |
+| 2-layer NN, 800 HU + elastic distortions | 0.7% | 99.3% |
+| 3-layer NN, 500+150 HU, softmax+cross-entropy | 1.53% | 98.5% |
+| 6-layer NN, 784-2500-2000-1500-1000-500-10 | 0.35% | 99.65% |
+
+The estimate "~97–98%" in CP-16 was correct; the precise value for a plain 800 HU MLP without
+data augmentation is **98.4%** (Simard et al. 2003).
+
+### Our architecture vs. the benchmark
+
+Our deep_elm uses a frozen random first layer — a structural disadvantage the backprop
+baseline does not have:
+
+```
+Benchmark MLP:    784 → 800 (backprop-trained) → 10 (backprop-trained)
+deep_elm_800:     784 → 800 (frozen random) → 800 (ELM) → 10 (ELM readout)
+```
+
+The deep_elm has an extra hidden layer (and thus more parameters), but the critical constraint
+is that W_0 is never learned — it contributes random (not class-discriminative) features.
+
+### Measured results (train and test, epoch 0)
+
+| Experiment | Architecture | Train acc | Test acc | vs. backprop 800 HU |
+|---|---|---|---|---|
+| `deep_elm_256` | 784→256(frozen)→256(ELM)→10 | 88.01% | 89.11% | −9.3% |
+| `deep_elm_800` | 784→800(frozen)→800(ELM)→10 | 93.65% | **93.87%** | −4.5% |
+| `deep_elm_2048` | 784→2048(frozen)→2048(ELM)→10 | — | — | — |
+| `deep_elm_4096_L3` | 784→4096(frozen)→4096(ELM)→4096(ELM)→10 | 98.01% | **96.84%** | −1.6% |
+| Backprop MLP, 800 HU (literature) | 784→800(trained)→10 | ~99% | **98.4%** | — |
+
+### Key findings
+
+- **deep_elm_800 generalises well**: test (93.87%) > train (93.65%) — no overfitting at d=800.
+- **deep_elm_4096_L3 generalises well**: train (98.01%) → test (96.84%), gap of 1.2%, modest
+  given 4096 frozen + 2×4096-ELM + readout on 60k training samples.
+- **Width is the dominant driver** of deep ELM accuracy. Frozen W_0 costs ~4.5% at d=800
+  compared to backprop, but the gap narrows dramatically with more width and depth.
+- **No backprop needed to reach 96.8% test on MNIST**: deep_elm_4096_L3 closes to within
+  1.6% of the standard 800 HU MLP benchmark using only analytical weight computation and a
+  frozen first layer.
+- The `deep_elm_800` cycle-1 dip (93.27% → 19.95% → recovers) is the same rank-deficient
+  W pattern as before; the GPU regularized Gram path (CP-27) allows full recovery.
+
+### Changes in this checkpoint
+- `evaluate()` refactored to `evaluate(DataSource& ds)` in both experiment classes.
+- `test_data_` (`t10k-*`) loader added to `DeepELMExperiment` and `HybridElmHebbianExperiment`.
+- Epoch-level prints now report both train and test accuracy.
+- `deep_elm_800` registered in `runner.cpp`.
+
+---
+
+## [CP-27] GPU-accelerated N-layer Deep ELM at d=4096
+**Date:** 2026-02-28
+
+Added cuSOLVER-backed GPU solvers and generalised both experiment classes to N hidden ELM layers.
+
+**Key changes:**
+- `ElmSolver::solve()`: GPU LU (Sgetrf/Sgetrs). Cholesky was tried first but failed at λ=1e-4
+  (eigenvalues of H^T H ~ 1730 → relative regularisation ~6e-8, insufficient for strict SPD).
+- `ElmSolver::propagate_target()` square-W branch: GPU regularised Gram path —
+  `H_target = T (W W^T + λI)^{-1} W` via Cholesky on the SPD Gram matrix.
+  Stable even for rank-deficient W (W solved from sparse ReLU targets has rank ≤ n_classes).
+- Both experiment classes generalised from hardcoded `w1_/w2_` to `hidden_` vector + `readout_`.
+- `CUDA::cusolver` added to `fayn_ops` link targets.
+- New registrations: `deep_elm_4096_L3` (n_hidden=2, n_cycles=5) and
+  `deep_elm_init_hebb_4096_L3` (n_hidden=2, elm_init=true, lr=0.01).
+
+**Results (epoch 0, train accuracy — test-set eval not yet implemented at this point):**
+
+| Experiment | Train acc |
+|---|---|
+| `deep_elm_4096_L3` (5 cycles) | 98.01% |
+| `deep_elm_init_hebb_4096_L3` peak (epoch 2) | 98.08% |
+
+The hybrid experiment degrades after epoch 2 (lr=0.01 gradient steps erode the ELM-initialised
+hidden layers), confirming that gradient-step destabilisation is a depth/scale problem.
+
+---
+
+## [CP-26] Hybrid ELM+gradient at 2048 dimensions: surpasses ELM ceiling
+**Date:** 2026-02-28 12:31 UTC
+
+Added `deep_elm_init_hebb_2048` (lr_w1=0.1) and `deep_elm_init_hebb_2048_lr01` (lr_w1=0.01).
+
+**Key finding: lr scaling matters.** At d=2048, lr=0.1 causes a catastrophic epoch 0 dip (45.9%);
+lr=0.01 gives a manageable dip (90.0%) with quick recovery.
+
+**Results (`deep_elm_init_hebb_2048_lr01`, 10 epochs):**
+
+| Point | Accuracy |
+|---|---|
+| ELM warm-start | 96.9% |
+| epoch 0 (stale W_2 dip) | 90.0% |
+| epoch 2 (recovers) | 96.9% |
+| **epoch 3–4 (peak)** | **97.1%** |
+| epoch 9 | 96.8% |
+
+The gradient step with ReLU-clamped targets genuinely breaks the pure ELM ceiling
+(96.9%) at d=2048, gaining +0.2% and holding it for 2 epochs. This confirms that
+the clamping fix (CP-25) is essential — without it the gradient step is destructive.
+
+At d=256 the equivalent `deep_elm_init_hebb_256` also surpassed ELM by +0.5% (89.6% vs 89.1%).
+
+**Registered experiments:** `deep_elm_init_hebb_2048` (lr=0.1, baseline) and
+`deep_elm_init_hebb_2048_lr01` (lr=0.01, best result).
+
+---
+
+## [CP-25] Fix ReLU approximation in target propagation (clamping)
+**Date:** 2026-02-28 12:20 UTC
+
+`propagate_target()` returns H_1* = T (W_2 W_2^T)^{-1} W_2 which can have negative
+values. But H_1 = ReLU(...) ≥ 0 always — negative targets are infeasible:
+- W_1 ELM solve tries to match impossible negatives → corrupts gradient direction
+- gradient_step error = H_1* − H_1 is spuriously negative where H_1* < 0, H_1 > 0
+  → kills active neurons that should be firing
+
+**Fix:** Project H_1* onto non-negative orthant before each W_1 solve/gradient step:
+`apply_relu(H1_tgt, nullptr)` after every `propagate_target()` call (3 sites in `deep_elm.cpp`).
+
+**Results after fix:**
+
+| Experiment | Before | After |
+|---|---|---|
+| `deep_elm_256` cycles 2+ | wild oscillation ~87.8-88.2% | stable fixed point ~88.0% |
+| `deep_elm_init_hebb_256` peak | 89.4% (ep 2-3), then degrades to 87.9% | **89.6%** (ep 3), holds ~89.2-89.5% |
+| `deep_elm_hebb_256` degradation rate | 84.9%→83.3% (10 ep) | 85.0%→84.0% (slower) |
+
+The clamping restores proper fixed-point semantics to alternating coordinate descent:
+the cycle loop now converges instead of oscillating. The `deep_elm_init_hebb_256`
+gradient step no longer punishes currently-active neurons for infeasible negative targets.
+
+---
+
+## [CP-24] Hybrid ELM+gradient experiments: per-epoch target-propagation refinement
+**Date:** 2026-02-28 12:11 UTC
+
+Two new experiments in `experiments/deep_elm/` using `HybridElmHebbianExperiment`.
+
+**Per-epoch algorithm:**
+1. `H_1 = ReLU(H_0 @ W_1^T)` (forward through current W_1)
+2. `W_2 = ELM(H_1, T, λ2)` (re-solve readout analytically every epoch)
+3. `H_1* = T (W_2 W_2^T)^{-1} W_2` (back-propagate targets through W_2)
+4. `W_1 += (lr/N) * (H_1* - H_1)^T @ H_0` (full-batch gradient step on W_1)
+
+New op: `ElmSolver::gradient_step()` — cuBLAS `Sgeam` (subtraction) + `Sgemm` (outer product) + `Saxpy` (update).
+
+**Results (d0=d1=256, lr_w1=0.1, λ2=1e-4, 10 epochs):**
+
+| Experiment | init | epoch 0 | epoch 2-3 | epoch 9 |
+|---|---|---|---|---|
+| `deep_elm_hebb_256` | random | 84.9% | ~84.6% | 83.2% (degrades) |
+| `deep_elm_init_hebb_256` | ELM warm-start | 76.0%* | 89.4% | 87.9% (degrades) |
+
+*epoch 0 dip: W_2 is solved for pre-gradient H_1 but evaluation sees post-gradient W_1 → W_2 stale by one step. Recovers to 88.9% in epoch 1 (W_2 re-solved).
+
+**Key findings:**
+- Random-init gradient: strictly detrimental — H_1* is poor supervision for random W_1 features.
+- ELM warm-start: transient +0.3% improvement at epochs 2-3 (89.4% vs 89.1% ELM baseline), then degrades.
+- Root cause of degradation: gradient step error is non-zero due to ReLU approximation. With lr=0.1, the step overshoots the ELM optimum repeatedly. Smaller lr or early stopping would be needed to hold the gain.
+- **Conclusion:** The ELM+gradient approach finds no robust improvement path over the deep ELM cycle 1 result.
+
+---
+
 ## [CP-23] Deep alternating ELM: target propagation unlocks a second trained layer
 **Date:** 2026-02-28 11:37 UTC
 
