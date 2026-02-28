@@ -230,6 +230,39 @@ namespace {
         });
     return true;
 }();
+// Delta-rule + normalize_pre: L2-normalise each hidden vector before outer
+// product so that lambda_max(H^T H) is independent of init_scale.
+// Fixes the LMS instability of the scaled-init delta-rule variants above.
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_delta_scaled_normed = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_delta_scaled_normed",
+        [](const fayn::ExperimentConfig& cfg) {
+            constexpr float   kScale = 19.8f;
+            constexpr int64_t kSeed  = 42;
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/0.01f, /*K=*/10, /*norm_every=*/1,
+                kScale, kSeed,
+                /*normalize_pre=*/true, /*lr_final=*/-1.f,
+                /*row_normalize=*/false, /*weight_decay=*/0.f,
+                /*hidden_dim=*/256, /*use_delta_rule=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_delta_scaled_2048_normed = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_delta_scaled_2048_normed",
+        [](const fayn::ExperimentConfig& cfg) {
+            constexpr float   kScale = 19.8f;
+            constexpr int64_t kSeed  = 42;
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/0.01f, /*K=*/10, /*norm_every=*/1,
+                kScale, kSeed,
+                /*normalize_pre=*/true, /*lr_final=*/-1.f,
+                /*row_normalize=*/false, /*weight_decay=*/0.f,
+                /*hidden_dim=*/2048, /*use_delta_rule=*/true);
+        });
+    return true;
+}();
 }
 
 static void print_usage(const char* prog) {

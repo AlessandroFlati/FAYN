@@ -5,6 +5,49 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-20] normalize_pre + DeltaRule: inconsistent, hurts accuracy
+**Date:** 2026-02-28 05:31 UTC
+
+Tested `normalize_pre=True` as a fix for the LMS instability of the scaled-init
+delta-rule variants (CP-19). Two new experiments: `ensemble_mnist_delta_scaled_normed`
+(256h) and `ensemble_mnist_delta_scaled_2048_normed` (2048h).
+
+**Results (K=10, scale=19.8, seed=42, lr=0.01, 30 epochs):**
+
+| Experiment | hidden | Acc |
+|---|---|---|
+| `ensemble_mnist_delta_scaled_normed`        | 256  | **70.9%** |
+| `ensemble_mnist_delta_scaled_2048_normed`   | 2048 | **82.2%** |
+| *(ref)* `ensemble_mnist_delta` (no norm)    | 256  | 84.2% |
+| *(ref)* `ensemble_mnist_delta_2048` (no norm) | 2048 | 92.5% |
+
+**Collapse is fixed; accuracy is worse.** `normalize_pre` with the delta rule
+introduces a forward/update inconsistency:
+
+- **Forward (inference):** `Ŷ = H @ W^T` — uses raw H
+- **Update:** `ΔW = (lr/N) * (T − Ŷ)^T @ H_normed` — uses normalized H
+
+The delta rule converges when `H_normed^T (T − H @ W^T) = 0`, giving:
+
+```
+W* = (H_normed^T H)^{-1} H_normed^T T
+```
+
+This is a **cross-covariance** solution — different from both the standard ELM
+`(H^T H)^{-1} H^T T` and the correctly-normalised ELM
+`(H_normed^T H_normed)^{-1} H_normed^T T`. It is worse than either.
+
+**Correct fixes for scaled-init LMS instability:**
+- Normalize H in the forward pass of d1 as well (changes DenseLayer semantics — non-trivial)
+- Reduce lr by ~400× for scale=19.8 variants (impractically slow convergence)
+- Avoid large init_scale with the delta rule (best practical advice)
+
+**Takeaway:** `normalize_pre` is compatible with `SupervisedHebbian` (where
+post = T is fixed, so there's no inconsistency). It must NOT be combined with
+`DeltaRule` unless the forward pass also uses normalized features.
+
+---
+
 ## [CP-19] Delta rule closes ELM gap from 13% to 3% at 2048h
 **Date:** 2026-02-27 21:22 UTC
 
