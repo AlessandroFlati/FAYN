@@ -321,6 +321,10 @@ Tensor tensor_subtract_bf16(const Tensor& a, const Tensor& b, cudaStream_t strea
         throw std::runtime_error("tensor_subtract_bf16: shape mismatch");
 
     Tensor c = Tensor::make(a.shape, DType::BFloat16, Device::CUDA);
+    // Tensor::make issues cudaMemset on the null/default stream; flush it now so
+    // the non-blocking-stream subtract_bf16_kernel does not race with the memset
+    // zeroing c.data after (or during) the kernel writes the result.
+    FAYN_CUDA_CHECK(cudaStreamSynchronize(nullptr));
     const size_t n  = a.numel();
     constexpr int TX = 256;
     const int grid  = static_cast<int>((n + TX - 1) / TX);

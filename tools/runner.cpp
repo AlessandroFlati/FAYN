@@ -263,6 +263,69 @@ namespace {
         });
     return true;
 }();
+// ---------------------------------------------------------------------------
+// CIW (Cluster-based Input Weight) variants.
+// d0 weights are replaced by k-means centroids (100 mini-batch iterations,
+// batch_sz=256) learned from the training images, then L2-normalised.
+// Each ensemble member uses a distinct seed for centroid diversity.
+// Delta rule on d1 (FP32 accumulation) for both 256-neuron and 2048-neuron.
+// ELM baseline with CIW features replaces the Hebbian readout with the exact
+// normal-equations solution — measures the full information content of CIW.
+// ---------------------------------------------------------------------------
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_delta_ciw = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_delta_ciw",
+        [](const fayn::ExperimentConfig& cfg) {
+            // CIW features are all-positive with E[H_ij] ≈ 3.6.  The Gram matrix
+            // H^T H / B has λ_max ≈ d * E[H²] ≈ 256 * 13 ≈ 3300.  Delta rule
+            // convergence requires lr < 2/λ_max ≈ 6e-4.  lr=0.001 is above the
+            // stability threshold (divergent); lr=2e-4 is safely below it.
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/2e-4f, /*K=*/10, /*norm_every=*/1,
+                /*scale=*/1.0f, /*seed=*/42LL,
+                /*normalize_pre=*/false, /*lr_final=*/-1.f,
+                /*row_normalize=*/false, /*weight_decay=*/0.f,
+                /*hidden_dim=*/256, /*use_delta_rule=*/true,
+                /*use_ciw=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_ensemble_mnist_delta_ciw_2048 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "ensemble_mnist_delta_ciw_2048",
+        [](const fayn::ExperimentConfig& cfg) {
+            // λ_max scales linearly with hidden_dim: 2048h needs 8× smaller lr
+            // than 256h.  lr=2e-4/8=2.5e-5; use 2e-5 for a comfortable margin.
+            return std::make_unique<fayn::EnsembleHebbianMnistExperiment>(
+                cfg, "data/mnist", /*lr=*/2e-5f, /*K=*/10, /*norm_every=*/1,
+                /*scale=*/1.0f, /*seed=*/42LL,
+                /*normalize_pre=*/false, /*lr_final=*/-1.f,
+                /*row_normalize=*/false, /*weight_decay=*/0.f,
+                /*hidden_dim=*/2048, /*use_delta_rule=*/true,
+                /*use_ciw=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_elm_ensemble_ciw = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "elm_ensemble_ciw",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::ELMEnsembleExperiment>(
+                cfg, "data/mnist", /*K=*/10, /*scale=*/1.0f, /*seed=*/42LL,
+                /*hidden_dim=*/256, /*use_ciw=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_elm_ensemble_ciw_2048 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "elm_ensemble_ciw_2048",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::ELMEnsembleExperiment>(
+                cfg, "data/mnist", /*K=*/10, /*scale=*/1.0f, /*seed=*/42LL,
+                /*hidden_dim=*/2048, /*use_ciw=*/true);
+        });
+    return true;
+}();
 }
 
 static void print_usage(const char* prog) {

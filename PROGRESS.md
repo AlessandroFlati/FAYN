@@ -5,6 +5,81 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-22] CIW initialization: helps delta rule, breaks ELM via Gram ill-conditioning
+**Date:** 2026-02-28 09:57 UTC
+
+Added Cluster-based Input Weight (CIW) initialisation for d0: mini-batch k-means
+(100 iterations, batch_sz=256) on the MNIST training images, L2-normalised
+centroids uploaded to d0's FP32 weight tensor. Each ensemble member uses a
+distinct seed for diversity. New infrastructure:
+
+- **`src/ops/ciw_init.hpp`** — `kmeans_minibatch()` (CPU) + `ciw_init()` (uploads
+  to `weights_fp32_` or BF16 weights); `load_mnist_images_float32()` helper.
+- **`ensemble_mnist.hpp/.cpp`** — `use_ciw` parameter on both experiment classes;
+  `EnsembleHebbianMnistExperiment::setup()` calls `ciw_init` per member when enabled.
+- **`tools/runner.cpp`** — 4 new registered experiments: `ensemble_mnist_delta_ciw`,
+  `ensemble_mnist_delta_ciw_2048`, `elm_ensemble_ciw`, `elm_ensemble_ciw_2048`.
+
+**Results (K=10, seed=42, batch_size=64):**
+
+| Experiment | hidden | lr | Method | Epochs | Acc |
+|---|---|---|---|---|---|
+| `ensemble_mnist_delta_ciw`      | 256  | 2e-4 | DeltaRule+CIW  | 10 | **81.1%** |
+| `ensemble_mnist_delta_ciw_2048` | 2048 | 2e-5 | DeltaRule+CIW  |  5 | **77.9%** |
+| `elm_ensemble_ciw`              | 256  | —    | ELM+CIW        |  1 | **37.9%** |
+| `elm_ensemble_ciw_2048`         | 2048 | —    | ELM+CIW        |  1 | **46.6%** |
+| *(ref)* `ensemble_mnist_delta`  | 256  | 0.01 | DeltaRule      | 100 | 90.0% (FP32) |
+| *(ref)* `ensemble_mnist_delta_2048` | 2048 | 0.01 | DeltaRule | 100 | 95.7% (FP32) |
+| *(ref)* `elm_ensemble_scaled`   | 256  | —    | ELM (Kaiming)  |  1 | 86.3% |
+| *(ref)* `elm_ensemble_scaled_2048` | 2048 | — | ELM (Kaiming) |  1 | 95.6% |
+
+**Key findings:**
+
+1. **CIW features are all-positive and highly correlated.** CIW centroids are
+   non-negative (pixel data), L2-normalised, and cluster in a positive orthant.
+   After the d0 GEMM (dot product of non-negative centroid with non-negative
+   pixels) every hidden unit fires for every sample: `H[b, j] ≈ 3.6` for all
+   `b, j`. This is fundamentally different from Kaiming random projections
+   (bipolar, ~50% dead after ReLU, nearly uncorrelated).
+
+2. **Delta rule requires lr scaled to hidden_dim.**  The LMS stability condition
+   is `lr < 2 / λ_max(H^T H / B)`. For all-positive CIW features:
+   ```
+   λ_max ≈ d × E[H²] ≈ d × 13
+   ```
+   The convergence threshold scales **linearly with hidden_dim**:
+   - 256h:  `lr_max ≈ 2/(256×13) ≈ 6e-4`  →  used `lr = 2e-4`
+   - 2048h: `lr_max ≈ 2/(2048×13) ≈ 7.5e-5` → used `lr = 2e-5`
+   Non-CIW Kaiming features have `E[H²] ≈ 0.05` (sparse, bipolar),
+   giving `lr_max ≈ 10× d` — compatible with `lr = 0.01` at any width.
+
+3. **CIW hurts ELM via Gram matrix ill-conditioning.** The normal equations
+   `(H^T H) W = H^T T` become numerically unstable:
+   - For all-positive `H` with `E[H] ≈ 3.6`, the Gram matrix
+     `H^T H / N ≈ E[H]^T E[H] + Cov(H)` is dominated by a **rank-1 component**
+     proportional to the outer product of the mean-feature vector (all ≈ 3.6).
+   - The condition number `κ ≈ d × E[H²] / Cov_min` is enormous (~10⁶).
+   - Gaussian elimination without regularisation produces garbage solutions.
+   - Result: ELM+CIW gives 37.9% (256h) and 46.6% (2048h), far below random
+     Kaiming ELM (86.3% and 95.6%).
+   - **Fix (not yet implemented)**: Tikhonov regularisation
+     `(H^T H + λI) W = H^T T` or SVD-based pseudoinverse.
+
+4. **CIW delta rule is comparable to Kaiming delta rule after few epochs.**
+   With the correct lr, CIW delta converges: 81.1% at 256h/10 epochs,
+   77.9% at 2048h/5 epochs (still rising). The CIW centroids are class-specific
+   clusters, so H features carry discriminative information — but the
+   all-positive structure limits separability compared to bipolar Kaiming features.
+   CIW does not provide a measurable benefit over Kaiming for the delta rule
+   at these widths.
+
+**CUDA null-stream race fix (incidental):** `tensor_subtract_bf16()` in
+`hebbian.cu` now calls `cudaStreamSynchronize(nullptr)` after `Tensor::make`
+to prevent the null-stream `cudaMemset` from racing with the subtract kernel
+on a non-blocking stream. This is a correctness fix regardless of CIW.
+
+---
+
 ## [CP-21] FP32 weight accumulation closes delta-rule gap to ELM entirely
 **Date:** 2026-02-28 06:16 UTC
 

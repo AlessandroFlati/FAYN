@@ -55,7 +55,8 @@ public:
         bool                    row_normalize   = true,
         float                   weight_decay    = 0.f,
         int                     hidden_dim      = 256,
-        bool                    use_delta_rule  = false);
+        bool                    use_delta_rule  = false,
+        bool                    use_ciw         = false);
 
 protected:
     void  setup()                  override;
@@ -81,6 +82,7 @@ private:
     float                weight_decay_    = 0.f;
     int                  hidden_dim_      = 256;
     bool                 use_delta_rule_  = false;
+    bool                 use_ciw_         = false;
     size_t               step_            = 0;
 
     std::vector<Member>  members_;
@@ -109,7 +111,8 @@ public:
         int num_networks              = 10,
         float d0_init_scale           = 1.0f,
         int64_t seed                  = -1,
-        int hidden_dim                = 256);
+        int hidden_dim                = 256,
+        bool use_ciw                  = false);
     ~ELMEnsembleExperiment() override;
 
 protected:
@@ -132,6 +135,7 @@ private:
     float               d0_init_scale_;
     int64_t             seed_;
     int                 hidden_dim_  = 256;
+    bool                use_ciw_     = false;
     std::vector<Member> members_;
     bool                fitted_  = false;
     cublasHandle_t      cublas_  = nullptr;

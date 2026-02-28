@@ -1,5 +1,6 @@
 #include "ensemble_mnist.hpp"
 
+#include "src/ops/ciw_init.hpp"
 #include "src/stats/event_bus.hpp"
 #include "src/stats/events.hpp"
 
@@ -29,7 +30,8 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     bool                    row_normalize,
     float                   weight_decay,
     int                     hidden_dim,
-    bool                    use_delta_rule)
+    bool                    use_delta_rule,
+    bool                    use_ciw)
     : Experiment(cfg)
     , mnist_dir_(mnist_dir)
     , lr_(lr)
@@ -43,6 +45,7 @@ EnsembleHebbianMnistExperiment::EnsembleHebbianMnistExperiment(
     , weight_decay_(weight_decay)
     , hidden_dim_(hidden_dim)
     , use_delta_rule_(use_delta_rule)
+    , use_ciw_(use_ciw)
 {}
 
 // ---------------------------------------------------------------------------
@@ -114,6 +117,24 @@ void EnsembleHebbianMnistExperiment::setup() {
 
         m.updater = std::make_unique<HebbianUpdater>(
             std::vector<HebbianUpdater::LayerConfig>{ std::move(lcfg) });
+    }
+
+    // CIW: overwrite each member's d0 weights with normalised k-means centroids.
+    // Each member uses a distinct seed for centroid diversity.
+    // Enable FP32 weights on d0 so ciw_init writes full-precision centroids and
+    // the forward pass uses the FP32×FP32→BF16 GEMM path (avoids BF16 weight
+    // quantisation noise and any BF16 GEMM quirks with all-positive weights).
+    if (use_ciw_) {
+        const auto ciw_data = load_mnist_images_float32(
+            mnist_dir_ + "/train-images-idx3-ubyte");
+        for (size_t k = 0; k < members_.size(); ++k) {
+            members_[k].d0->enable_fp32_weights();
+            const int64_t member_seed = (seed_ >= 0 ? seed_ : 0LL)
+                                        + static_cast<int64_t>(k);
+            ciw_init(*members_[k].d0, ciw_data, member_seed);
+        }
+        fmt::print("ciw_init: initialized {} members (M={})\n",
+                   members_.size(), hidden_dim_);
     }
 }
 
@@ -201,7 +222,8 @@ float EnsembleHebbianMnistExperiment::run_epoch(size_t epoch) {
         out_ptrs.reserve(member_outputs.size());
         for (auto& t : member_outputs) out_ptrs.push_back(&t);
 
-        total_acc += ensemble_accuracy(out_ptrs, batch.targets);
+        const float bacc = ensemble_accuracy(out_ptrs, batch.targets);
+        total_acc += bacc;
 
         // Set one-hot targets for each member's readout layer.
         // one_hot_encode takes const Tensor& so batch.targets is not consumed.
@@ -267,13 +289,15 @@ ELMEnsembleExperiment::ELMEnsembleExperiment(
     int num_networks,
     float d0_init_scale,
     int64_t seed,
-    int hidden_dim)
+    int hidden_dim,
+    bool use_ciw)
     : Experiment(cfg)
     , mnist_dir_(mnist_dir)
     , num_networks_(num_networks)
     , d0_init_scale_(d0_init_scale)
     , seed_(seed)
     , hidden_dim_(hidden_dim)
+    , use_ciw_(use_ciw)
 {
     FAYN_CUBLAS_CHECK(cublasCreate(&cublas_));
 }
@@ -311,6 +335,21 @@ void ELMEnsembleExperiment::setup() {
         mnist_dir_ + "/train-labels-idx1-ubyte");
     data_->set_output_device(Device::CUDA);
     data_->set_input_dtype(DType::BFloat16);
+
+    // CIW: overwrite each member's d0 weights with normalised k-means centroids.
+    // Enable FP32 on d0 for the same reasons as EnsembleHebbianMnistExperiment.
+    if (use_ciw_) {
+        const auto ciw_data = load_mnist_images_float32(
+            mnist_dir_ + "/train-images-idx3-ubyte");
+        for (size_t k = 0; k < members_.size(); ++k) {
+            members_[k].d0->enable_fp32_weights();
+            const int64_t member_seed = (seed_ >= 0 ? seed_ : 0LL)
+                                        + static_cast<int64_t>(k);
+            ciw_init(*members_[k].d0, ciw_data, member_seed);
+        }
+        fmt::print("ciw_init: initialized {} members (M={})\n",
+                   members_.size(), hidden_dim_);
+    }
 }
 
 // ---------------------------------------------------------------------------

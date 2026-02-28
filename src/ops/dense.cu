@@ -195,19 +195,37 @@ Tensor DenseLayer::forward(const Tensor& x) {
     const float alpha = 1.0f;
     const float beta  = 0.0f;
 
+    // Declared at function scope so they outlive the if-block and remain valid
+    // until cudaStreamSynchronize below.  fp32_to_bf16_kernel reads out_fp32
+    // on a non-blocking stream; if out_fp32 were destroyed before the sync,
+    // cudaFree would not wait for the kernel and the freed memory could be
+    // reallocated/zeroed before the kernel completes → H=0 bug.
+    Tensor inp_fp32;
+    Tensor out_fp32;
+
     if (has_fp32_weights()) {
         constexpr int TX = 256;
 
-        // Upcast input BF16 → FP32.
+        // Allocate both intermediate FP32 buffers before submitting any kernel.
+        // Tensor::make zero-initialises via cudaMemset on the null/default stream.
+        // cudaStreamNonBlocking streams do NOT synchronise with the null stream,
+        // so the null-stream memsets could race with the non-blocking stream
+        // kernels that write and read these buffers.  A single
+        // cudaStreamSynchronize(nullptr) after both allocations guarantees the
+        // zero-initialisation completes before any non-blocking kernel runs.
         const size_t inp_n = batch * in_features_;
-        Tensor inp_fp32 = Tensor::make({batch, in_features_}, DType::Float32, Device::CUDA);
+        inp_fp32 = Tensor::make({batch, in_features_},  DType::Float32, Device::CUDA);
+        out_fp32 = Tensor::make({batch, out_features_}, DType::Float32, Device::CUDA);
+        FAYN_CUDA_CHECK(cudaStreamSynchronize(nullptr));  // flush null-stream memsets
+
+        // Upcast input BF16 → FP32.
         bf16_to_fp32_kernel<<<static_cast<int>((inp_n + TX-1)/TX), TX, 0, stream>>>(
             static_cast<float*>(inp_fp32.data),
             static_cast<const __nv_bfloat16*>(x.data), inp_n);
         FAYN_CUDA_CHECK(cudaGetLastError());
 
         // FP32 × FP32 → FP32 GEMM (same transposition as BF16 path).
-        Tensor out_fp32 = Tensor::make({batch, out_features_}, DType::Float32, Device::CUDA);
+        // out_fp32 is already allocated above.
         FAYN_CUBLAS_CHECK(cublasGemmEx(
             cublas_handle_,
             CUBLAS_OP_T, CUBLAS_OP_N,
@@ -233,6 +251,9 @@ Tensor DenseLayer::forward(const Tensor& x) {
         }
 
         // Downcast FP32 → BF16 into the pre-allocated output tensor.
+        // Sync the stream first to ensure the GEMM and bias are complete before
+        // the downcast kernel reads out_fp32.  (Diagnostic guard — remove if perf matters.)
+        FAYN_CUDA_CHECK(cudaStreamSynchronize(stream));
         const size_t out_n = batch * out_features_;
         fp32_to_bf16_kernel<<<static_cast<int>((out_n + TX-1)/TX), TX, 0, stream>>>(
             static_cast<__nv_bfloat16*>(output.data),
@@ -269,12 +290,18 @@ Tensor DenseLayer::forward(const Tensor& x) {
     // the GEMM+bias (needed because StreamPool uses cudaStreamNonBlocking,
     // which does not synchronise with the null/default stream).
     if (cache_activations_) {
-        last_input_ = Tensor::make(x.shape, x.dtype, Device::CUDA);
+        // Allocate both cache tensors before submitting the async copies.
+        // Same null-stream vs non-blocking-stream ordering hazard as above:
+        // synchronise the null stream after both Tensor::make calls so the
+        // cudaMemset zero-initialisations complete before the cudaMemcpyAsync
+        // writes to the same buffers on the non-blocking stream.
+        last_input_  = Tensor::make(x.shape,      x.dtype,      Device::CUDA);
+        last_output_ = Tensor::make(output.shape,  output.dtype, Device::CUDA);
+        FAYN_CUDA_CHECK(cudaStreamSynchronize(nullptr));  // flush null-stream memsets
+
         FAYN_CUDA_CHECK(cudaMemcpyAsync(
             last_input_.data, x.data, x.nbytes(),
             cudaMemcpyDeviceToDevice, stream));
-
-        last_output_ = Tensor::make(output.shape, output.dtype, Device::CUDA);
         FAYN_CUDA_CHECK(cudaMemcpyAsync(
             last_output_.data, output.data, output.nbytes(),
             cudaMemcpyDeviceToDevice, stream));
