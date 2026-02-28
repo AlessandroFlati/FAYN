@@ -41,6 +41,7 @@ void HebbianMnistExperiment::setup() {
     // Node 2: Dense hidden_dim_ -> 10 (SupervisedHebbian — target one-hot as post)
     d1_ = std::make_shared<DenseLayer>(static_cast<size_t>(hidden_dim_), 10, /*bias=*/false);
     d1_->set_cache_activations(true);
+    d1_->enable_fp32_weights();
     int n2 = graph_->add_node(d1_);
 
     graph_->add_edge(0, 1);

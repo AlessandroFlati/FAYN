@@ -90,10 +90,11 @@ void EnsembleHebbianMnistExperiment::setup() {
         relu->set_compute_stats(false);
         m.graph->add_node(std::move(relu));
 
-        // d1: readout hidden_dim_ -> 10, trained with SupervisedHebbian.
+        // d1: readout hidden_dim_ -> 10, trained with SupervisedHebbian or DeltaRule.
         m.d1 = std::make_shared<DenseLayer>(static_cast<size_t>(hidden_dim_), 10, /*bias=*/false);
         m.d1->set_cache_activations(true);
         m.d1->set_compute_stats(false);
+        m.d1->enable_fp32_weights();
         const int n2 = m.graph->add_node(m.d1);
 
         m.graph->add_edge(0, 1);
@@ -298,6 +299,7 @@ void ELMEnsembleExperiment::setup() {
 
         m.d1 = std::make_shared<DenseLayer>(static_cast<size_t>(hidden_dim_), 10, /*bias=*/false);
         m.d1->set_compute_stats(false);
+        m.d1->enable_fp32_weights();
         const int n2 = m.graph->add_node(m.d1);
 
         m.graph->add_edge(0, 1);
@@ -423,15 +425,15 @@ void ELMEnsembleExperiment::elm_fit() {
         gauss_solve(A_cm, b_rm, (int)d, (int)C);
 
         // b_rm now holds W_solve [d, C] row-major.
-        // d1->weights() shape is [C, d] row-major: W[j, i] = W_solve[i, j].
-        // Cast to BF16, transpose into weights layout.
-        std::vector<__nv_bfloat16> W_bf16(C * d);
+        // d1->weights_fp32() shape is [C, d] row-major: W[j, i] = W_solve[i, j].
+        // Write directly to FP32 tensor — no BF16 rounding of the ELM solution.
+        std::vector<float> W_fp32(C * d);
         for (size_t i = 0; i < d; ++i)
             for (size_t j = 0; j < C; ++j)
-                W_bf16[j * d + i] = __float2bfloat16(b_rm[i * C + j]);
+                W_fp32[j * d + i] = b_rm[i * C + j];
 
-        FAYN_CUDA_CHECK(cudaMemcpy(m.d1->weights().data, W_bf16.data(),
-                                   C * d * sizeof(__nv_bfloat16),
+        FAYN_CUDA_CHECK(cudaMemcpy(m.d1->weights_fp32().data, W_fp32.data(),
+                                   C * d * sizeof(float),
                                    cudaMemcpyHostToDevice));
     }
 

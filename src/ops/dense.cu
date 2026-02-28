@@ -13,6 +13,31 @@
 namespace fayn {
 
 // ---------------------------------------------------------------------------
+// Cast kernels: BF16 ↔ FP32 element-wise.
+// ---------------------------------------------------------------------------
+__global__ void bf16_to_fp32_kernel(float* dst, const __nv_bfloat16* src, size_t n) {
+    const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = static_cast<float>(src[i]);
+}
+
+__global__ void fp32_to_bf16_kernel(__nv_bfloat16* dst, const float* src, size_t n) {
+    const size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __float2bfloat16(src[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Bias-add kernel for FP32 output: output[b, j] += bias[j]
+// ---------------------------------------------------------------------------
+__global__ void bias_add_fp32_kernel(float* output, const float* bias,
+                                     size_t batch_size, size_t out_features)
+{
+    const size_t b = blockIdx.y;
+    const size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b < batch_size && j < out_features)
+        output[b * out_features + j] += bias[j];
+}
+
+// ---------------------------------------------------------------------------
 // Bias-add kernel: output[b, j] += bias[j]  (BF16 output, FP32 bias)
 // ---------------------------------------------------------------------------
 __global__ void bias_add_kernel(
@@ -112,6 +137,18 @@ void DenseLayer::init_weights() {
     layer_stats_.init(out_features_);
 }
 
+void DenseLayer::enable_fp32_weights() {
+    weights_fp32_ = Tensor::make({out_features_, in_features_}, DType::Float32, Device::CUDA);
+    const size_t n = weights_.numel();
+    constexpr int TX = 256;
+    const int grid = static_cast<int>((n + TX - 1) / TX);
+    bf16_to_fp32_kernel<<<grid, TX>>>(
+        static_cast<float*>(weights_fp32_.data),
+        static_cast<const __nv_bfloat16*>(weights_.data), n);
+    FAYN_CUDA_CHECK(cudaGetLastError());
+    FAYN_CUDA_CHECK(cudaDeviceSynchronize());
+}
+
 size_t DenseLayer::num_params() const {
     return out_features_ * in_features_ + (use_bias_ ? out_features_ : 0);
 }
@@ -150,37 +187,81 @@ Tensor DenseLayer::forward(const Tensor& x) {
 
     // y[batch, out] = x[batch, in] @ W^T[in, out]   (row-major)
     //
-    // Row-major <-> col-major duality:
-    //   A row-major M[m,n] == col-major M^T[n,m] with leading dimension n.
+    // Two paths:
+    //   FP32 weights: upcast input BF16→FP32, FP32×FP32→FP32 GEMM, add bias in
+    //     FP32, downcast output FP32→BF16. Eliminates weight-quantisation error.
+    //   BF16 weights: standard BF16 GEMM with FP32 accumulation (legacy path).
     //
-    // Equivalent col-major GEMM: y^T[out,batch] = W[out,in] @ x^T[in,batch]
-    //   A = W.data → col-major [in, out] (ld=in)   TRANSA=T → W[out,in]
-    //   B = x.data → col-major [in, batch] (ld=in) TRANSB=N → x^T[in,batch]
-    //   C = y.data → col-major [out, batch] (ld=out)
-    //
-    float alpha = 1.0f;
-    float beta  = 0.0f;
-    FAYN_CUBLAS_CHECK(cublasGemmEx(
-        cublas_handle_,
-        CUBLAS_OP_T,                  // transa
-        CUBLAS_OP_N,                  // transb
-        static_cast<int>(out_features_),   // m
-        static_cast<int>(batch),           // n
-        static_cast<int>(in_features_),    // k
-        &alpha,
-        weights_.data, CUDA_R_16BF, static_cast<int>(in_features_),  // A, ld=in
-        x.data,        CUDA_R_16BF, static_cast<int>(in_features_),  // B, ld=in
-        &beta,
-        output.data,   CUDA_R_16BF, static_cast<int>(out_features_), // C, ld=out
-        CUBLAS_COMPUTE_32F,
-        CUBLAS_GEMM_DEFAULT));
+    const float alpha = 1.0f;
+    const float beta  = 0.0f;
 
-    // Bias add.
-    if (use_bias_) {
-        add_bias_bf16(
+    if (has_fp32_weights()) {
+        constexpr int TX = 256;
+
+        // Upcast input BF16 → FP32.
+        const size_t inp_n = batch * in_features_;
+        Tensor inp_fp32 = Tensor::make({batch, in_features_}, DType::Float32, Device::CUDA);
+        bf16_to_fp32_kernel<<<static_cast<int>((inp_n + TX-1)/TX), TX, 0, stream>>>(
+            static_cast<float*>(inp_fp32.data),
+            static_cast<const __nv_bfloat16*>(x.data), inp_n);
+        FAYN_CUDA_CHECK(cudaGetLastError());
+
+        // FP32 × FP32 → FP32 GEMM (same transposition as BF16 path).
+        Tensor out_fp32 = Tensor::make({batch, out_features_}, DType::Float32, Device::CUDA);
+        FAYN_CUBLAS_CHECK(cublasGemmEx(
+            cublas_handle_,
+            CUBLAS_OP_T, CUBLAS_OP_N,
+            static_cast<int>(out_features_),
+            static_cast<int>(batch),
+            static_cast<int>(in_features_),
+            &alpha,
+            weights_fp32_.data, CUDA_R_32F, static_cast<int>(in_features_),
+            inp_fp32.data,      CUDA_R_32F, static_cast<int>(in_features_),
+            &beta,
+            out_fp32.data,      CUDA_R_32F, static_cast<int>(out_features_),
+            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+
+        // Bias add in FP32 (before downcast).
+        if (use_bias_) {
+            constexpr int BX = 128;
+            dim3 bg(static_cast<unsigned>((out_features_ + BX-1) / BX),
+                    static_cast<unsigned>(batch));
+            bias_add_fp32_kernel<<<bg, BX, 0, stream>>>(
+                static_cast<float*>(out_fp32.data),
+                static_cast<const float*>(bias_.data), batch, out_features_);
+            FAYN_CUDA_CHECK(cudaGetLastError());
+        }
+
+        // Downcast FP32 → BF16 into the pre-allocated output tensor.
+        const size_t out_n = batch * out_features_;
+        fp32_to_bf16_kernel<<<static_cast<int>((out_n + TX-1)/TX), TX, 0, stream>>>(
             static_cast<__nv_bfloat16*>(output.data),
-            static_cast<const float*>(bias_.data),
-            batch, out_features_, stream);
+            static_cast<const float*>(out_fp32.data), out_n);
+        FAYN_CUDA_CHECK(cudaGetLastError());
+    } else {
+        // BF16 × BF16 → BF16, FP32 accumulation.
+        FAYN_CUBLAS_CHECK(cublasGemmEx(
+            cublas_handle_,
+            CUBLAS_OP_T,                  // transa
+            CUBLAS_OP_N,                  // transb
+            static_cast<int>(out_features_),   // m
+            static_cast<int>(batch),           // n
+            static_cast<int>(in_features_),    // k
+            &alpha,
+            weights_.data, CUDA_R_16BF, static_cast<int>(in_features_),  // A, ld=in
+            x.data,        CUDA_R_16BF, static_cast<int>(in_features_),  // B, ld=in
+            &beta,
+            output.data,   CUDA_R_16BF, static_cast<int>(out_features_), // C, ld=out
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT));
+
+        // Bias add.
+        if (use_bias_) {
+            add_bias_bf16(
+                static_cast<__nv_bfloat16*>(output.data),
+                static_cast<const float*>(bias_.data),
+                batch, out_features_, stream);
+        }
     }
 
     // Cache activations if requested (for Hebbian / perturbation updates).

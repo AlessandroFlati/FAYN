@@ -148,14 +148,21 @@ private:
             if (cfg.weight_decay > 0.f)
                 weight_decay_weights(cfg.layer->weights(), cfg.weight_decay, stream);
 
-            hebbian_update(cfg.layer->weights(),
-                           *pre_ptr,
-                           *post_ptr,
-                           effective_lr, stream);
-
-            ++step_counters_[i];
-            if (cfg.normalize && (step_counters_[i] % cfg.normalize_every == 0))
-                normalize_weights_rows(cfg.layer->weights(), 1e-8f, stream);
+            if (cfg.layer->has_fp32_weights()) {
+                // FP32 accumulation path: deltas land in the FP32 weight tensor,
+                // bypassing the BF16 step-size floor near convergence.
+                hebbian_update_fp32(cfg.layer->weights_fp32(),
+                                    *pre_ptr, *post_ptr, effective_lr, stream);
+                ++step_counters_[i];
+                if (cfg.normalize && (step_counters_[i] % cfg.normalize_every == 0))
+                    normalize_weights_rows_fp32(cfg.layer->weights_fp32(), 1e-8f, stream);
+            } else {
+                hebbian_update(cfg.layer->weights(),
+                               *pre_ptr, *post_ptr, effective_lr, stream);
+                ++step_counters_[i];
+                if (cfg.normalize && (step_counters_[i] % cfg.normalize_every == 0))
+                    normalize_weights_rows(cfg.layer->weights(), 1e-8f, stream);
+            }
         }
 
         FAYN_CUDA_CHECK(cudaStreamSynchronize(stream));

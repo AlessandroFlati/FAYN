@@ -178,6 +178,127 @@ void normalize_weights_rows(Tensor& weights, float eps, cudaStream_t stream) {
 }
 
 // ---------------------------------------------------------------------------
+// hebbian_fused_kernel_fp32: same as hebbian_fused_kernel but W is FP32.
+// Accumulates the outer-product delta directly into the float weight tensor,
+// bypassing BF16 rounding entirely.
+// ---------------------------------------------------------------------------
+__global__ void hebbian_fused_kernel_fp32(
+    float*               W,
+    const __nv_bfloat16* pre,
+    const __nv_bfloat16* post,
+    float                scale,
+    size_t               batch,
+    size_t               in_feat,
+    size_t               out_feat)
+{
+    const size_t out_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    const size_t in_idx  = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= out_feat || in_idx >= in_feat) return;
+
+    float delta = 0.f;
+    for (size_t b = 0; b < batch; ++b)
+        delta += static_cast<float>(pre[b * in_feat + in_idx]) *
+                 static_cast<float>(post[b * out_feat + out_idx]);
+
+    W[out_idx * in_feat + in_idx] += scale * delta;
+}
+
+void hebbian_update_fp32(
+    Tensor&       weights,
+    const Tensor& pre,
+    const Tensor& post,
+    float         lr,
+    cudaStream_t  stream)
+{
+    if (weights.device != Device::CUDA || pre.device != Device::CUDA || post.device != Device::CUDA)
+        throw std::runtime_error("hebbian_update_fp32: all tensors must be on CUDA");
+    if (weights.dtype != DType::Float32)
+        throw std::runtime_error("hebbian_update_fp32: weights must be Float32");
+    if (pre.dtype != DType::BFloat16 || post.dtype != DType::BFloat16)
+        throw std::runtime_error("hebbian_update_fp32: pre/post must be BFloat16");
+    if (pre.shape.size() != 2 || post.shape.size() != 2 || weights.shape.size() != 2)
+        throw std::runtime_error("hebbian_update_fp32: all tensors must be 2D");
+
+    const size_t batch    = pre.shape[0];
+    const size_t in_feat  = pre.shape[1];
+    const size_t out_feat = post.shape[1];
+
+    if (post.shape[0] != batch)
+        throw std::runtime_error("hebbian_update_fp32: batch size mismatch");
+    if (weights.shape[0] != out_feat || weights.shape[1] != in_feat)
+        throw std::runtime_error("hebbian_update_fp32: weight shape mismatch");
+
+    const float scale = lr / static_cast<float>(batch);
+
+    constexpr int TX = 16, TY = 16;
+    dim3 block(TX, TY);
+    dim3 grid(static_cast<unsigned>((in_feat  + TX - 1) / TX),
+              static_cast<unsigned>((out_feat + TY - 1) / TY));
+
+    hebbian_fused_kernel_fp32<<<grid, block, 0, stream>>>(
+        static_cast<float*>(weights.data),
+        static_cast<const __nv_bfloat16*>(pre.data),
+        static_cast<const __nv_bfloat16*>(post.data),
+        scale, batch, in_feat, out_feat);
+    FAYN_CUDA_CHECK(cudaGetLastError());
+}
+
+// ---------------------------------------------------------------------------
+// row_normalize_fp32_kernel: same as row_normalize_kernel but W is FP32.
+// ---------------------------------------------------------------------------
+__global__ void row_normalize_fp32_kernel(
+    float* W,
+    size_t out_features,
+    size_t in_features,
+    float  eps)
+{
+    const size_t row = blockIdx.x;
+    if (row >= out_features) return;
+
+    extern __shared__ float smem[];
+
+    float sum_sq = 0.f;
+    for (size_t j = threadIdx.x; j < in_features; j += blockDim.x) {
+        float v = W[row * in_features + j];
+        sum_sq += v * v;
+    }
+    smem[threadIdx.x] = sum_sq;
+    __syncthreads();
+
+    for (unsigned s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) smem[0] = rsqrtf(fmaxf(smem[0], eps * eps));
+    __syncthreads();
+
+    const float inv_norm = smem[0];
+    for (size_t j = threadIdx.x; j < in_features; j += blockDim.x)
+        W[row * in_features + j] *= inv_norm;
+}
+
+void normalize_weights_rows_fp32(Tensor& weights, float eps, cudaStream_t stream) {
+    if (weights.device != Device::CUDA)
+        throw std::runtime_error("normalize_weights_rows_fp32: tensor must be on CUDA");
+    if (weights.dtype != DType::Float32)
+        throw std::runtime_error("normalize_weights_rows_fp32: tensor must be Float32");
+    if (weights.shape.size() != 2)
+        throw std::runtime_error("normalize_weights_rows_fp32: expected 2D tensor");
+
+    const size_t out = weights.shape[0];
+    const size_t in  = weights.shape[1];
+
+    const int block = static_cast<int>(std::min(in, size_t{256}));
+    const int grid  = static_cast<int>(out);
+    const int smem  = block * static_cast<int>(sizeof(float));
+
+    row_normalize_fp32_kernel<<<grid, block, smem, stream>>>(
+        static_cast<float*>(weights.data), out, in, eps);
+    FAYN_CUDA_CHECK(cudaGetLastError());
+}
+
+// ---------------------------------------------------------------------------
 // subtract_bf16_kernel: C[i] = A[i] - B[i], element-wise in BF16.
 // ---------------------------------------------------------------------------
 __global__ void subtract_bf16_kernel(

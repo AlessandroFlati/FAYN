@@ -41,6 +41,32 @@ void normalize_weights_rows(
     cudaStream_t stream = nullptr);
 
 // ---------------------------------------------------------------------------
+// hebbian_update_fp32: same as hebbian_update but W is FP32.
+//
+// Used when DenseLayer::has_fp32_weights() is true so that weight deltas are
+// accumulated in full precision (avoids the BF16 step-size floor that stalls
+// delta-rule convergence near the ELM solution).
+//
+// W:    [out, in]    FP32, device  (updated in place)
+// pre:  [batch, in]  BF16, device
+// post: [batch, out] BF16, device
+// ---------------------------------------------------------------------------
+void hebbian_update_fp32(
+    Tensor&       weights,
+    const Tensor& pre,
+    const Tensor& post,
+    float         lr,
+    cudaStream_t  stream = nullptr);
+
+// ---------------------------------------------------------------------------
+// normalize_weights_rows_fp32: same as normalize_weights_rows but W is FP32.
+// ---------------------------------------------------------------------------
+void normalize_weights_rows_fp32(
+    Tensor&      weights,
+    float        eps    = 1e-8f,
+    cudaStream_t stream = nullptr);
+
+// ---------------------------------------------------------------------------
 // weight_decay_weights: W ← W * (1 - decay), element-wise.
 //
 // Pre-step L2 regularisation. Applied before the Hebbian update so that

@@ -43,6 +43,16 @@ public:
     Tensor&       weights()       { return weights_; }
     Tensor&       bias()          { return bias_; }
 
+    // Optional FP32 weight tensor for full-precision forward pass and updates.
+    // When enabled, forward() uses a FP32×FP32→BF16 GEMM path, eliminating
+    // weight-quantisation error. HebbianUpdater accumulates deltas directly
+    // into the FP32 tensor; elm_fit() writes W* here without BF16 rounding.
+    // Call after construction but before the first forward() call.
+    void          enable_fp32_weights();
+    bool          has_fp32_weights()   const noexcept { return weights_fp32_.data != nullptr; }
+    Tensor&       weights_fp32()             { return weights_fp32_; }
+    const Tensor& weights_fp32()       const { return weights_fp32_; }
+
     size_t in_features()  const noexcept { return in_features_; }
     size_t out_features() const noexcept { return out_features_; }
 
@@ -80,8 +90,9 @@ private:
     float       init_scale_;
     std::string name_;
 
-    Tensor weights_;   // BF16, device
-    Tensor bias_;      // FP32, device
+    Tensor weights_;       // BF16, device
+    Tensor weights_fp32_;  // FP32, device (optional; set via enable_fp32_weights())
+    Tensor bias_;          // FP32, device
 
     cublasHandle_t cublas_handle_ = nullptr;
 
