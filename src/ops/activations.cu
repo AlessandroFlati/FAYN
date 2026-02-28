@@ -25,6 +25,12 @@ __device__ __forceinline__ T leaky_relu_fn(T x, float alpha) {
     return x > T(0) ? x : T(alpha) * x;
 }
 
+template<typename T>
+__device__ __forceinline__ T leaky_relu_inv_fn(T x, float alpha) {
+    // Inverse of leaky_relu: y<0 → y/alpha  (alpha must be != 0)
+    return x >= T(0) ? x : x / T(alpha);
+}
+
 // GELU approximation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 template<typename T>
 __device__ __forceinline__ T gelu_fn(T x) {
@@ -108,6 +114,113 @@ void apply_leaky_relu(Tensor& x, float alpha, cudaStream_t stream) {
         [alpha]__device__(__half v)          { return leaky_relu_fn(v, alpha); },
         [alpha]__device__(__nv_bfloat16 v)   { return leaky_relu_fn(v, alpha); },
         [alpha]__device__(float v)           { return leaky_relu_fn(v, alpha); });
+}
+
+void apply_leaky_relu_inverse(Tensor& x, float alpha, cudaStream_t stream) {
+    if (alpha == 0.f)
+        throw std::invalid_argument("apply_leaky_relu_inverse: alpha must be non-zero");
+    dispatch_by_dtype(x, stream,
+        [alpha]__device__(__half v)          { return leaky_relu_inv_fn(v, alpha); },
+        [alpha]__device__(__nv_bfloat16 v)   { return leaky_relu_inv_fn(v, alpha); },
+        [alpha]__device__(float v)           { return leaky_relu_inv_fn(v, alpha); });
+}
+
+// ---------------------------------------------------------------------------
+// ADMM FP32-only kernels
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// admm_z_update_kernel: element-wise exact minimizer of the ADMM Z-subproblem
+//
+// min_z  (rho/2)(z - c)^2  +  (mu/2)(LeakyReLU(z) - t)^2
+//
+// where c = A[i] - u[i]  (ADMM-corrected bottom-up pre-activation)
+//       t = T_target[i]  (post-activation target from top-down propagation)
+//
+// Closed-form case analysis (LeakyReLU slope = leaky_alpha):
+//   Case z >= 0: sigma(z) = z   → z1 = (rho*c + mu*t) / (rho+mu)
+//   Case z <  0: sigma(z) = a*z → z2 = (rho*c + mu*a*t) / (rho + mu*a^2)
+//
+//   Decision:
+//     z1 >= 0 → use z1  (the z>=0 branch minimizer is in the z>=0 region)
+//     z1 <  0 → check z<0 branch:
+//       z2 <  0 → use z2
+//       z2 >= 0 → use 0  (boundary: both branch minimizers infeasible, f is V-shaped at 0)
+//
+// This avoids the 1/alpha amplification of the old linear blend.
+// ---------------------------------------------------------------------------
+__global__ void admm_z_update_kernel(
+    float* __restrict__       Z,
+    const float* __restrict__ A,
+    const float* __restrict__ u,
+    const float* __restrict__ T_target,
+    float rho, float mu, float inv_rho_mu, float leaky_alpha,
+    size_t n)
+{
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float c  = A[i] - u[i];
+    const float t  = T_target[i];
+    const float z1 = (rho * c + mu * t) * inv_rho_mu;
+    if (z1 >= 0.f) {
+        Z[i] = z1;
+    } else {
+        const float z2 = (rho * c + mu * leaky_alpha * t)
+                       / (rho + mu * leaky_alpha * leaky_alpha);
+        Z[i] = (z2 < 0.f) ? z2 : 0.f;
+    }
+}
+
+__global__ void admm_dual_update_kernel(
+    float* __restrict__       u,
+    const float* __restrict__ A,
+    const float* __restrict__ Z,
+    size_t n)
+{
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    u[i] += A[i] - Z[i];
+}
+
+void admm_z_update(Tensor& Z, const Tensor& A, const Tensor& u,
+                   const Tensor& T_target, float rho, float mu,
+                   float leaky_alpha, cudaStream_t stream)
+{
+    if (Z.dtype != DType::Float32 || A.dtype != DType::Float32 ||
+        u.dtype != DType::Float32 || T_target.dtype != DType::Float32)
+        throw std::runtime_error("admm_z_update: all tensors must be Float32");
+    if (Z.device != Device::CUDA)
+        throw std::runtime_error("admm_z_update: tensors must be on CUDA");
+    const size_t n = Z.numel();
+    constexpr int BLOCK = 256;
+    int grid = static_cast<int>((n + BLOCK - 1) / BLOCK);
+    float inv_total = 1.f / (rho + mu);
+    admm_z_update_kernel<<<grid, BLOCK, 0, stream>>>(
+        static_cast<float*>(Z.data),
+        static_cast<const float*>(A.data),
+        static_cast<const float*>(u.data),
+        static_cast<const float*>(T_target.data),
+        rho, mu, inv_total, leaky_alpha, n);
+    FAYN_CUDA_CHECK(cudaGetLastError());
+}
+
+void admm_dual_update(Tensor& u, const Tensor& A, const Tensor& Z,
+                      cudaStream_t stream)
+{
+    if (u.dtype != DType::Float32 || A.dtype != DType::Float32 ||
+        Z.dtype != DType::Float32)
+        throw std::runtime_error("admm_dual_update: all tensors must be Float32");
+    if (u.device != Device::CUDA)
+        throw std::runtime_error("admm_dual_update: tensors must be on CUDA");
+    const size_t n = u.numel();
+    constexpr int BLOCK = 256;
+    int grid = static_cast<int>((n + BLOCK - 1) / BLOCK);
+    admm_dual_update_kernel<<<grid, BLOCK, 0, stream>>>(
+        static_cast<float*>(u.data),
+        static_cast<const float*>(A.data),
+        static_cast<const float*>(Z.data),
+        n);
+    FAYN_CUDA_CHECK(cudaGetLastError());
 }
 
 void apply_gelu(Tensor& x, cudaStream_t stream) {

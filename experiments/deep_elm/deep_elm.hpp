@@ -124,4 +124,82 @@ private:
     std::unique_ptr<MnistLoader> test_data_;
 };
 
+// ---------------------------------------------------------------------------
+// AdmmElmExperiment: N-layer ELM trained via proximal ALS with LeakyReLU.
+//
+// Problem: treat pre-activations Z_k as free variables to decouple layers:
+//
+//   min_{W_k, Z_k}  ||H_n W_r^T - T||^2_F + lambda*sum||W_k||^2_F
+//                 + (rho/2)*sum||Z_k - H_{k-1}W_k^T||^2_F   [linear constraint]
+//                 + (mu/2)*sum||sigma(Z_k) - T_k||^2_F       [top-down target]
+//
+// where T_k is the Gram-propagated top-down target for H_k.
+//
+// Proximal ALS iteration (no dual variables — coordinate descent on the
+// penalty objective, guaranteed non-increasing loss each step):
+//
+//   1. W_k  = solve(H_{k-1}, Z_k, lambda/rho)     [W maps H_prev → current Z_k]
+//   2. W_r  = solve(H_n, T, lambda)               [ELM readout; H_n = sigma(Z_n)]
+//   3. A_k  = H_{k-1} @ W_k^T                    [new linear pre-acts with updated W]
+//   4. T_k  = Gram-propagate: T_n=prop(W_r,T); T_{k-1}=prop(W_k,T_k)  [top-down]
+//   5. Z_k  = argmin_z (rho/2)(z-A_k)^2 + (mu/2)(sigma(z)-T_k)^2      [Z-update]
+//             Closed-form element-wise case split (sigma = LeakyReLU, slope alpha):
+//               c = A_k[i], t = T_k[i]
+//               z1 = (rho*c + mu*t) / (rho+mu)            -- valid if z1 >= 0
+//               z2 = (rho*c + mu*alpha*t) / (rho+mu*a^2)  -- valid if z2 < 0
+//               else z = 0  (V-shaped; boundary is global min)
+//
+// Key properties vs. target propagation (DeepELMExperiment):
+//   - Z_k BLENDS bottom-up (A_k from W) and top-down (T_k) information
+//   - W is solved to match the current Z_k (not directly the propagated target)
+//   - No dual variable accumulation → stable for non-convex problems
+//   - Z step is (rho/(rho+mu)) A_k + (mu/(rho+mu)) sigma^{-1}(T_k) in the z>=0 case
+//     → rho/mu ratio controls bottom-up vs top-down trade-off
+//
+// LeakyReLU (alpha > 0) is used throughout so sigma^{-1} is well-defined:
+//   sigma^{-1}(y) = y if y>=0, y/alpha if y<0.  ReLU (alpha=0) is NOT invertible.
+//   alpha=0.1 ensures the negative branch case-split stays within factor 10.
+// ---------------------------------------------------------------------------
+class AdmmElmExperiment : public Experiment {
+public:
+    AdmmElmExperiment(const ExperimentConfig& cfg,
+                      std::string data_path,
+                      int   d0          = 256,
+                      int   d           = 256,
+                      int   n_hidden    = 1,
+                      int   n_admm      = 20,
+                      float lambda      = 1e-4f,
+                      float rho         = 1.f,
+                      float mu          = 1.f,
+                      float leaky_alpha = 0.1f);
+
+    void  setup()           override;
+    float run_epoch(size_t) override;
+
+private:
+    std::string data_path_;
+    int   d0_, d_, n_hidden_, n_admm_;
+    float lambda_, rho_, mu_, leaky_alpha_;
+
+    std::shared_ptr<DenseLayer>              w0_;
+    std::vector<std::shared_ptr<DenseLayer>> hidden_;
+    std::shared_ptr<DenseLayer>              readout_;
+    ElmSolver                                solver_;
+
+    Tensor H0_dev_;
+    Tensor T_dev_;
+    size_t N_fit_ = 0;
+
+    // Proximal ALS state
+    std::vector<Tensor> Z_;   // consensus pre-activations [N_fit, d] per hidden layer
+    Tensor              u_zero_;  // pre-allocated zero tensor [N_fit, d] — avoids per-iter alloc
+
+    void                precompute_h0_t();
+    std::vector<Tensor> get_hidden_activations() const;  // H_k = LeakyReLU(Z_k)
+    float               evaluate(DataSource& ds);
+    void                write_fp32_weights(DenseLayer& layer, const Tensor& W_fp32);
+
+    std::unique_ptr<MnistLoader> test_data_;
+};
+
 } // namespace fayn

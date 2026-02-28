@@ -42,12 +42,29 @@ inline const char* activation_name(ActivationType t) {
 // All functions operate in-place on 'x' (BF16 or FP16 on device).
 // 'stream' may be nullptr (uses default stream).
 // ---------------------------------------------------------------------------
-void apply_relu      (Tensor& x, cudaStream_t stream = nullptr);
-void apply_leaky_relu(Tensor& x, float alpha = 0.01f, cudaStream_t stream = nullptr);
-void apply_gelu      (Tensor& x, cudaStream_t stream = nullptr);
-void apply_silu      (Tensor& x, cudaStream_t stream = nullptr);
-void apply_tanh      (Tensor& x, cudaStream_t stream = nullptr);
-void apply_sigmoid   (Tensor& x, cudaStream_t stream = nullptr);
+void apply_relu              (Tensor& x, cudaStream_t stream = nullptr);
+void apply_leaky_relu        (Tensor& x, float alpha = 0.01f, cudaStream_t stream = nullptr);
+void apply_leaky_relu_inverse(Tensor& x, float alpha = 0.01f, cudaStream_t stream = nullptr);
+void apply_gelu              (Tensor& x, cudaStream_t stream = nullptr);
+void apply_silu              (Tensor& x, cudaStream_t stream = nullptr);
+void apply_tanh              (Tensor& x, cudaStream_t stream = nullptr);
+void apply_sigmoid           (Tensor& x, cudaStream_t stream = nullptr);
+
+// ---------------------------------------------------------------------------
+// ADMM utility kernels (FP32, CUDA only).
+// ---------------------------------------------------------------------------
+
+// Fused Z-update for one hidden layer:
+//   Z[i] = (rho*(A[i] - u[i]) + mu*leaky_relu_inv(T_target[i])) / (rho + mu)
+// All tensors must be Float32 on CUDA with identical shape.
+void admm_z_update(Tensor& Z, const Tensor& A, const Tensor& u,
+                   const Tensor& T_target, float rho, float mu,
+                   float leaky_alpha, cudaStream_t stream = nullptr);
+
+// Dual update: u[i] += A[i] - Z[i]
+// All tensors must be Float32 on CUDA with identical shape.
+void admm_dual_update(Tensor& u, const Tensor& A, const Tensor& Z,
+                      cudaStream_t stream = nullptr);
 
 // ---------------------------------------------------------------------------
 // Custom activation plugin.

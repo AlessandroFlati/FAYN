@@ -364,6 +364,49 @@ public:
     }
 
     // -----------------------------------------------------------------------
+    // linear_forward: H_out = H @ W^T  — all FP32, all on device, no activation.
+    //
+    // H:      FP32 [N, d_in]     on device
+    // W:      FP32 [d_out, d_in] on device
+    // Returns H_out: FP32 [N, d_out] on device
+    // -----------------------------------------------------------------------
+    Tensor linear_forward(const Tensor& H, const Tensor& W) const {
+        if (H.dtype != DType::Float32 || W.dtype != DType::Float32)
+            throw std::invalid_argument("ElmSolver::linear_forward: tensors must be Float32");
+
+        const int N     = static_cast<int>(H.shape[0]);
+        const int d_in  = static_cast<int>(H.shape[1]);
+        const int d_out = static_cast<int>(W.shape[0]);
+        if (d_in != static_cast<int>(W.shape[1]))
+            throw std::invalid_argument("ElmSolver::linear_forward: H/W inner dimension mismatch");
+
+        Tensor H_out = Tensor::make(
+            {static_cast<size_t>(N), static_cast<size_t>(d_out)}, DType::Float32, Device::CUDA);
+        const float alpha = 1.f, beta = 0.f;
+
+        // H_out_cm[d_out,N] = W_cm[d_out,d_in] @ H_cm[d_in,N] = W @ H^T = H_out^T
+        // Read H_out_cm col-major as H_out_rm[N,d_out] ✓
+        FAYN_CUBLAS_CHECK(cublasSgemm(
+            cublas_, CUBLAS_OP_T, CUBLAS_OP_N,
+            d_out, N, d_in, &alpha,
+            static_cast<const float*>(W.data), d_in,
+            static_cast<const float*>(H.data), d_in,
+            &beta, static_cast<float*>(H_out.data), d_out));
+
+        FAYN_CUDA_CHECK(cudaStreamSynchronize(nullptr));
+        return H_out;
+    }
+
+    // -----------------------------------------------------------------------
+    // leaky_relu_forward: H_out = LeakyReLU(H @ W^T)
+    // -----------------------------------------------------------------------
+    Tensor leaky_relu_forward(const Tensor& H, const Tensor& W, float alpha) const {
+        Tensor H_out = linear_forward(H, W);
+        apply_leaky_relu(H_out, alpha, /*stream=*/nullptr);
+        return H_out;
+    }
+
+    // -----------------------------------------------------------------------
     // relu_forward: H_out = ReLU(H @ W^T)  — all FP32, all on device.
     //
     // H:      FP32 [N, d_in]  on device

@@ -368,6 +368,19 @@ namespace {
         });
     return true;
 }();
+// Wide random projection (8192) into a 1600-dim ELM hidden layer — tests whether
+// doubling learned width beyond 800 further closes the gap to backprop baseline.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_8192_1600 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_8192_1600",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/8192, /*d=*/1600, /*n_hidden=*/1, /*n_cycles=*/20,
+                /*lambda=*/1e-4f);
+        });
+    return true;
+}();
 [[maybe_unused]] static const bool _fayn_reg_deep_elm_32k_800 = []() {
     fayn::ExperimentRegistry::instance().register_experiment(
         "deep_elm_32k_800",
@@ -376,6 +389,35 @@ namespace {
                 cfg, "data/mnist",
                 /*d0=*/32768, /*d=*/800, /*n_hidden=*/1, /*n_cycles=*/20,
                 /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+// ---------------------------------------------------------------------------
+// ADMM-ELM experiments
+// ---------------------------------------------------------------------------
+// Baseline: d0=256, d=256, 1 hidden layer — directly comparable to deep_elm_256.
+[[maybe_unused]] static const bool _fayn_reg_admm_elm_256 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "admm_elm_256",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::AdmmElmExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/256, /*d=*/256, /*n_hidden=*/1,
+                /*n_admm=*/20, /*lambda=*/1e-4f,
+                /*rho=*/1.f, /*mu=*/1.f, /*leaky_alpha=*/0.1f);
+        });
+    return true;
+}();
+// Wide frozen projection sweep: d0=8192, d=800 — comparable to deep_elm_8192_800.
+[[maybe_unused]] static const bool _fayn_reg_admm_elm_8192_800 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "admm_elm_8192_800",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::AdmmElmExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/8192, /*d=*/800, /*n_hidden=*/1,
+                /*n_admm=*/20, /*lambda=*/1e-4f,
+                /*rho=*/1.f, /*mu=*/1.f, /*leaky_alpha=*/0.1f);
         });
     return true;
 }();
