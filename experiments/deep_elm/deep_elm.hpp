@@ -1,6 +1,7 @@
 #pragma once
 
 #include "experiments/experiment.hpp"
+#include "src/ops/conv_frontend.hpp"
 #include "src/ops/dense.hpp"
 #include "src/ops/elm_solver.hpp"
 #include "src/io/mnist_loader.hpp"
@@ -39,12 +40,19 @@ class DeepELMExperiment : public Experiment {
 public:
     DeepELMExperiment(const ExperimentConfig& cfg,
                       std::string data_path,
-                      int   d0       = 256,
-                      int   d        = 256,    // width of all ELM hidden layers
-                      int   n_hidden = 1,      // # hidden ELM layers (excl. readout)
-                      int   n_cycles = 5,
-                      float lambda   = 1e-4f,
-                      bool  use_tanh = false); // tanh hidden activation (invertible)
+                      int   d0        = 256,
+                      int   d         = 256,    // width of all ELM hidden layers
+                      int   n_hidden  = 1,      // # hidden ELM layers (excl. readout)
+                      int   n_cycles  = 5,
+                      float lambda    = 1e-4f,
+                      bool  use_tanh  = false,  // tanh hidden activation (invertible)
+                      bool  use_rff   = false,  // RFF: cos(W_0 x + b) instead of ReLU
+                      float rff_gamma = 0.01f,  // RFF bandwidth: W_0 rows ~ N(0, rff_gamma*I)
+                      bool  augment   = false,  // 4-shift pixel augmentation (5x training set)
+                      bool  use_tta   = false,  // test-time augmentation: avg over 5 shifted views
+                      bool  use_conv   = false, // replace W_0 with 5×5 conv + 2×2 max-pool
+                      int   conv_c_out = 32,    // number of conv filters (d0 = conv_c_out * 144)
+                      bool  learn_conv = false); // update conv filters each cycle (ELM solve)
 
     void  setup()           override;
     float run_epoch(size_t) override;
@@ -57,10 +65,18 @@ private:
     int         n_cycles_;
     float       lambda_;
     bool        use_tanh_;
+    bool        use_rff_;
+    float       rff_gamma_;
+    bool        augment_;
+    bool        use_tta_;
+    bool        use_conv_;
+    int         conv_c_out_;
+    bool        learn_conv_;
 
-    std::shared_ptr<DenseLayer>              w0_;       // frozen projection [784 → d0]
-    std::vector<std::shared_ptr<DenseLayer>> hidden_;   // n_hidden layers: [d0→d], [d→d]...
-    std::shared_ptr<DenseLayer>              readout_;  // ELM readout [d → 10]
+    std::shared_ptr<DenseLayer>              w0_;         // frozen projection [784 → d0] (non-conv)
+    std::unique_ptr<ConvFrontend>            conv_front_; // 5×5 conv front-end (conv only)
+    std::vector<std::shared_ptr<DenseLayer>> hidden_;     // n_hidden layers: [d0→d], [d→d]...
+    std::shared_ptr<DenseLayer>              readout_;    // ELM readout [d → 10]
     ElmSolver                                solver_;
 
     Tensor  H0_dev_;    // FP32 [N_fit, d0] on device — precomputed once in setup()
@@ -68,8 +84,10 @@ private:
     size_t  N_fit_ = 0;
 
     void                precompute_h0_t();
+    void                recompute_h0_conv();             // re-run conv fwd after filter update
     std::vector<Tensor> compute_hidden_activations() const;
     float               evaluate(DataSource& ds);
+    float               evaluate_tta(DataSource& ds);   // TTA: avg 5 shifted views
     void                write_fp32_weights(DenseLayer& layer, const Tensor& W_fp32);
 
     std::unique_ptr<MnistLoader> test_data_;
@@ -200,6 +218,82 @@ private:
 
     void                precompute_h0_t();
     std::vector<Tensor> get_hidden_activations() const;  // H_k = LeakyReLU(Z_k)
+    float               evaluate(DataSource& ds);
+    void                write_fp32_weights(DenseLayer& layer, const Tensor& W_fp32);
+
+    std::unique_ptr<MnistLoader> test_data_;
+};
+
+// ---------------------------------------------------------------------------
+// DeepELMEnsembleExperiment: M independent deep ELM models with different
+// random projections W_0, independently solved hidden + readout layers.
+// Inference aggregates logits from all M members (logit averaging).
+//
+// Architecture (per member m):
+//   x[N,784] → W_0^m[784→d0, frozen Kaiming] → ReLU → H_0^m
+//             → W_1^m[d0→d, ELM] → ReLU → H_1^m
+//             → ... (n_hidden hidden layers total)
+//             → readout^m[d→10, ELM] → logits^m
+// Final prediction: argmax(sum_m logits^m)
+//
+// Ensemble gain comes from independent random projections: each W_0^m spans
+// a different d0-dimensional subspace of the 784-dim input, and the ELM
+// solution averages out projection-specific errors.
+// Members are trained sequentially to avoid holding all M×H0 tensors in GPU
+// memory simultaneously (each H0 [N_fit, d0] is ~960MB at d0=4096).
+// ---------------------------------------------------------------------------
+class DeepELMEnsembleExperiment : public Experiment {
+public:
+    // conv_k_per_member: per-member kernel size for use_conv=true.
+    //   Empty → all members use k=5.
+    //   Non-empty → size must equal n_members; each entry is 3, 5, or 7.
+    // use_aug: compute H0 on original + 4 pixel-shifted views (5× rows).
+    //   The ELM solve sees augmented features; target propagation is unchanged.
+    //   Only supported with use_conv=true (forward pass must be FP32).
+    DeepELMEnsembleExperiment(const ExperimentConfig& cfg,
+                              std::string data_path,
+                              int                n_members        = 5,
+                              int                d0               = 4096,
+                              int                d                = 4096,
+                              int                n_hidden         = 1,
+                              int                n_cycles         = 5,
+                              float              lambda           = 1e-4f,
+                              bool               use_conv         = false,
+                              int                conv_c_out       = 64,
+                              std::vector<int>   conv_k_per_member = {},
+                              bool               use_aug          = false);
+
+    void  setup()           override;
+    float run_epoch(size_t) override;
+
+private:
+    struct Member {
+        std::shared_ptr<DenseLayer>              w0;         // non-conv path
+        std::unique_ptr<ConvFrontend>            conv_front; // conv path
+        std::vector<std::shared_ptr<DenseLayer>> hidden;
+        std::shared_ptr<DenseLayer>              readout;
+        int                                      d0 = 0;    // front-end output width
+    };
+
+    std::string      data_path_;
+    int              n_members_, d0_, d_, n_hidden_, n_cycles_;
+    float            lambda_;
+    bool             use_conv_;
+    int              conv_c_out_;
+    std::vector<int> conv_k_per_member_;
+    bool             use_aug_;
+
+    std::vector<Member> members_;
+    ElmSolver           solver_;
+
+    Tensor  T_dev_;     // FP32 [N_fit, 10] — one-hot labels (shared across members)
+    Tensor  T_aug_dev_; // FP32 [5*N_fit, 10] — augmented labels (use_aug only)
+    size_t  N_fit_ = 0;
+
+    Tensor              compute_member_h0(const Member& m);
+    std::vector<Tensor> compute_member_hidden(const Tensor& H0, const Member& m) const;
+    void                run_member_cycles(Member& m, const Tensor& H0, const Tensor& T);
+    float               evaluate_member(const Member& m, DataSource& ds);
     float               evaluate(DataSource& ds);
     void                write_fp32_weights(DenseLayer& layer, const Tensor& W_fp32);
 

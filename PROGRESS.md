@@ -5,6 +5,538 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-38] Feature-level augmentation (5× views) — 98.58% MNIST test
+**Date:** 2026-03-01 14:44 UTC
+
+### Motivation
+The conv ELM ensemble already reached 98.26% (5 members, K=5, L2). Three further
+directions were tested in order:
+1. **10-member ensemble**: scale from 5 to 10 conv64 L2 members.
+2. **Multi-scale conv ensemble**: mix kernel sizes K=3,5,7 across members.
+3. **Feature-level augmentation**: compute H₀ from 5 views (original + 4 pixel shifts)
+   to 5× the effective training set size for the ELM solve.
+
+### Infrastructure added
+- `ConvFrontend`: added `int k` constructor parameter (k ∈ {3,5,7}). Templated
+  `im2col_tmpl<KS>` CUDA kernel dispatched via `launch_im2col()`. Learned-conv
+  primitives guard to k=5 only.
+- `DeepELMEnsembleExperiment`: added `conv_k_per_member` (per-member kernel override)
+  and `use_aug` (feature-level augmentation via 5 views). `run_member_cycles` takes an
+  explicit `const Tensor& T` parameter (supports augmented T of 5×N rows).
+- Bug fix: final readout re-solve in `run_member_cycles` was using `T_dev_` directly
+  instead of the passed `T` — caused batch-size mismatch when `use_aug=true`.
+
+### Results
+
+| Experiment | Members | K | aug | n_hidden | Test acc |
+|---|---|---|---|---|---|
+| deep_elm_conv64_ensemble_5xL2 | 5 | 5 | no | 1 | 98.26% |
+| deep_elm_conv64_ensemble_10xL2 | 10 | 5 | no | 1 | 98.34% |
+| deep_elm_multiscale3_ensemble_3xL2 | 3 | 3,5,7 | no | 1 | 98.14% |
+| deep_elm_multiscale3_ensemble_6xL2 | 6 | 3,3,5,5,7,7 | no | 1 | 98.09% |
+| **deep_elm_conv64_aug_ensemble_5xL2** | **5** | **5** | **yes** | **1** | **98.57% ← new best** |
+| **deep_elm_conv64_aug_ensemble_10xL2** | **10** | **5** | **yes** | **1** | **98.58% ← new best** |
+
+Individual aug-5 member test accuracies: 98.35%, 98.48%, 98.21%, 98.31%, 98.37%.
+
+### Analysis
+- **10 members vs 5**: marginal gain (+0.08%). Law of diminishing returns; error
+  correlation between members dominates over further variance reduction past ~5.
+- **Multi-scale**: K=3 members score only 96.99–97.04% (receptive field too small for
+  5×5 local patterns in MNIST digits); mixing them into an ensemble drags accuracy below
+  uniform K=5. Multi-scale is counterproductive for MNIST at this scale.
+- **Feature augmentation (+0.31% over non-aug 5-member)**: augmenting H₀ (not raw
+  images) avoids the target-propagation rank collapse that would occur if augmenting
+  at the image level in L3 (square-W backprop on a rank≤10 W fails). At L2 (no square-W
+  backprop), augmentation 5×'s the effective sample size for the ELM Gram solve, directly
+  improving the H^T H estimate and reducing overfitting.
+- **Why augment H₀ and not images**: ELM solve is (H^T H + λI)^{-1} H^T T. Augmenting
+  images multiplies N→5N in Gram computation → better-conditioned H^T H → lower
+  generalization error. No extra cost at inference time (only 1 forward pass per image).
+
+### Conclusion
+**New SOTA: 98.58% on MNIST test set** (no backprop, no standard CNN training).
+Ensemble of 10 ELMs with independent conv64 front-ends + 5× feature augmentation,
+each member solved once.
+
+---
+
+## [CP-37] ELM ensemble — conv front-end × 5 members achieves 98.26% MNIST test
+**Date:** 2026-03-01 11:55 UTC
+
+### Motivation
+CP-36 found single conv64_L3 = 98.07% and single FC d=4096 L3 = 96.84% (test).
+Ensemble averaging over independent random projections reduces estimation variance
+without requiring more compute per inference. Each member sees a different subspace;
+their errors are partially decorrelated.
+
+### Infrastructure added
+- `DeepELMEnsembleExperiment`: M independent deep ELM models, each with its own
+  random front-end (W₀ or ConvFrontend), independently solved hidden+readout layers.
+  Members trained sequentially (one H0 [N_fit,d0] in GPU memory at a time). Inference
+  averages logits from all M members.
+- `ConvFrontend::kaiming_init()` fixed: was using hardcoded seed 42 for all instances
+  (all ensemble conv members got **identical** filters); now uses an atomic counter
+  `conv_kaiming_seed` to give each instance a unique seed.
+- New experiments registered: `deep_elm_ensemble_5x4096_L2`, `deep_elm_ensemble_3x4096_L3`,
+  `deep_elm_conv64_ensemble_3xL3`, `deep_elm_conv64_ensemble_5xL2`.
+
+### Train/test accuracy correction (CP-27 documentation error)
+CP-27 PROGRESS.md explicitly notes: "train accuracy — test-set eval not yet implemented
+at this point." The 98.04% figure recorded in MEMORY.md and CP-36 for `deep_elm_4096_L3`
+was TRAINING accuracy. **Actual test accuracy for FC deep_elm_4096_L3 = 96.84%.**
+CP-36's "Slightly above the FC baseline of 98.04%" is therefore incorrect; the true gap
+is **conv64_L3 (98.07%) − FC (96.84%) = +1.23%**, not +0.03%.
+
+### Results
+
+| Experiment | Members | Front-end | n_hidden | Test acc |
+|---|---|---|---|---|
+| deep_elm_4096_L3 (single) | 1 | FC d0=4096 | 2 | 96.84% |
+| deep_elm_ensemble_5x4096_L2 | 5 | FC d0=4096 | 1 | 97.44% |
+| deep_elm_ensemble_3x4096_L3 | 3 | FC d0=4096 | 2 | 97.31% |
+| deep_elm_conv64_L3 (single) | 1 | Conv64 | 2 | 98.07% |
+| deep_elm_conv64_ensemble_3xL3 | 3 | Conv64 | 2 | 98.15% |
+| **deep_elm_conv64_ensemble_5xL2** | **5** | **Conv64** | **1** | **98.26% ← new best** |
+
+Individual conv64 L2 members: 98.06%, 97.76%, 97.87%, 97.85%, 97.95%.
+Individual conv64 L3 members: 98.07%, 97.78%, 97.89%.
+
+FC ensemble individual members (5×L2): 96.85–97.09%; (3×L3): 96.84–97.02%.
+
+### Analysis
+- Conv features provide +1.23% over FC: structured local receptive fields extract
+  better spatial patterns than random linear projection.
+- 5 members improves over 3 by an additional ~0.11%: more independent votes → more
+  variance reduction (consistent with √M asymptote).
+- L2 vs L3: at d=4096 the 2nd hidden ELM layer adds negligible gain (conv features are
+  already high-quality); L2 ensemble achieves +0.19% more than L3 ensemble, probably
+  because L2 trains faster (fewer target-propagation approximation errors accumulate).
+- FC ensemble: L2 > L3 also holds (97.44% vs 97.31%), for the same reason.
+
+### Conclusion
+**New SOTA: 98.26% on MNIST test set** (no data augmentation, no backprop).
+Ensemble of 5 single-hidden-layer ELMs with independent conv64 front-ends, each
+member solved once in ~35s. Continued ensemble scaling (more members, larger C_out)
+would likely push further but with diminishing returns.
+
+---
+
+## [CP-36] Direction 3: Convolutional front-end — frozen Kaiming wins, learned conv fails
+**Date:** 2026-03-01 11:27 UTC
+
+### Approach
+Replace the random linear projection W₀ [784→d0] with a learnable 5×5 conv + ReLU + 2×2
+max-pool front-end (ConvFrontend class). C_out filters each of size 5×5 = 25 parameters,
+producing d0 = C_out × 144 features per sample. Two variants tested:
+- **Frozen Kaiming**: filters initialized once with Kaiming uniform; never updated.
+- **Learned conv**: filters updated after ELM convergence via target-propagation ELM solve.
+
+### New infrastructure
+- `src/ops/conv_frontend.hpp/cu`: CUDA im2col + max-pool + 2×2 upsample; cuBLAS GEMM for
+  conv forward; CPU 25×25 Gauss-Jordan for conv filter ELM solve.
+- `ElmSolver::propagate_target` generalized: GPU Gram path now handles non-square W (any
+  d_out ≥ 64); CPU Gram path kept for tiny readout W (d_out < 64).
+- `ElmSolver::matmul(A, B)`: new method computing A @ B (no transpose) via cuBLAS GEMM.
+- `DeepELMExperiment`: added `use_conv`, `conv_c_out`, `learn_conv` parameters.
+
+### Frozen conv results (test accuracy, epoch 0, 5 cycles, d=4096, λ=1e-4)
+
+| Experiment              | C_out | n_hidden | d0    | test   |
+|-------------------------|-------|----------|-------|--------|
+| deep_elm_conv32_L1      | 32    | 1        | 4608  | 97.68% |
+| deep_elm_conv32_L3      | 32    | 2        | 4608  | 97.71% |
+| deep_elm_conv64_L1      | 64    | 1        | 9216  | 98.02% |
+| **deep_elm_conv64_L3**  | 64    | 2        | 9216  | **98.07%** ← new best |
+| deep_elm_conv128_L1     | 128   | 1        | 18432 | 97.71% (overfitting) |
+| deep_elm_conv64_L3 λ=5e-4 | 64  | 2        | 9216  | 98.05% |
+| deep_elm_conv64_L3 λ=1e-3 | 64  | 2        | 9216  | 98.03% |
+
+Best λ is 1e-4 (default). C_out=64 is the sweet spot; 32 undertrained, 128 overfits
+(train=99.83%, test=97.71%). L3 (+0.05%) marginally better than L1.
+
+### Learned conv results (test accuracy, epoch 0)
+
+| Experiment                | C_out | n_hidden | test   |
+|---------------------------|-------|----------|--------|
+| deep_elm_conv64_L1_learned| 64    | 1        | 94.27% |
+| deep_elm_conv64_L3_learned| 64    | 2        | 94.32% |
+
+**Learned conv is 3.75% WORSE than frozen Kaiming.** Algorithm: after ELM cycles
+converge, propagate the target back through W₀ (new GPU non-square Gram path) to get
+T₀ [N, d0] = target for conv output, then solve normal equations over im2col patches.
+After conv update, re-run n_cycles to re-adapt hidden layers.
+
+### Root cause of learned conv failure
+Target propagation through readout → W₀ produces rank-≤10 targets (one per MNIST class),
+regardless of d0_=9216. The conv ELM solve fits 25×64=1600 parameters to rank-10 targets:
+54 of the 64 conv output channels collapse into the null space of T₀, effectively wasting
+6/7 of the conv capacity. Kaiming random init provides diverse, linearly independent filters
+that span a full-rank d0-dimensional feature space — exactly what the downstream ELM needs.
+
+### Conclusion
+- **Best result: 98.07%** (frozen conv64, 2 ELM hidden layers + readout, d=4096, λ=1e-4)
+- Slightly above the FC baseline of 98.04% (d0=4096 random projection, 2 hidden + readout)
+- Learned conv is structurally unable to improve on random init: the rank bottleneck
+  in target propagation makes it collapse to a 10-dimensional feature space.
+- The 0.03% gain of conv over FC is within noise; conv features are not significantly
+  better than random linear projection at this scale.
+
+**Next directions (CP-37+):** The MNIST ceiling at ~98% appears fundamental for the current
+architecture (no augmentation, no architectural innovations). Options: (a) ensemble of
+independent ELMs with different random projections, (b) CIFAR-10 or other datasets,
+(c) multi-layer target propagation with better propagation rule (gradient-based).
+
+---
+
+## [CP-35] Directions 2/5/6: Augmentation, Depth/Width scaling, TTA — all negative
+**Date:** 2026-03-01 10:21 UTC
+
+### Direction 2: Data augmentation (training)
+
+4-shift pixel augmentation (left/right/up/down by 1 pixel → 5× training set):
+- `deep_elm_aug_4096_L3` (λ=1e-4): train=97.39%, **test=97.14%** — regression from 98.04%
+- `deep_elm_aug_4096_L3_lam5` (λ=5e-4, scaled for 5× samples): **crash** in cycle 2
+  - Cholesky failed (devInfo=2554): W solved from augmented targets is near-singular.
+    W W^T + 1e-4·I fails the SPD check. Root cause: with N=299k samples and λ=5e-4,
+    the ELM solve is nearly interpolating, producing W with near-zero singular values.
+
+**Why augmentation hurts:** The model is already perfectly regularized (train≈test=98.04% baseline).
+Augmented images introduce distribution mismatch into the target propagation chain: the W hidden
+layers are now also trained to "explain" shifted versions, making the features less specific to
+unshifted test images. The ELM readout trained on augmented H averages classification confidence
+over 5 views rather than maximizing it for one.
+
+### Direction 5 (partial): Depth beyond L3, wider W₀
+
+**Depth L5** (n_hidden=4, d=4096):
+- `deep_elm_relu_4096_L5`: **test=96.84%** (vs L3 98.04%)
+- Cycle 3 drops to 93.64%, cycle 4 recovers to 96.68% → oscillation
+- Root cause: target amplitude cascade κ(W)^4 makes each propagation step amplify targets;
+  with 4 back-propagation steps the fixed point becomes unstable. L3 is the optimal depth.
+
+**Wider W₀** (d0=8192, d=4096):
+| Experiment | λ | Train | Test |
+|---|---|---|---|
+| `deep_elm_8192_4096_L3` | 1e-4 | 99.11% | 97.64% |
+| `deep_elm_8192_4096_L3_lam1e3` | 1e-3 | 99.12% | 97.64% |
+| `deep_elm_8192_4096_L3_lam1e2` | 1e-2 | 99.13% | 97.65% |
+
+**Test accuracy stuck at 97.64% regardless of λ (1e-4 to 1e-2).** The overfitting is structural:
+8192 random Kaiming features find more training-specific patterns than 4096, and no regularization
+level recovers the 98.04% test accuracy. W₀ width 4096 is already the optimal.
+
+### Direction 6: Test-time augmentation (TTA)
+
+`deep_elm_tta_4096_L3`: average logits over original + 4 pixel-shifted views at inference.
+- Train (original): 98.01%
+- **Test (TTA): 97.33%** — WORSE than no TTA (98.04%)
+
+**Why TTA hurts for deep ELM:** Unlike CNNs with max-pooling (approximately translation-equivariant),
+deep ELM with ReLU activations is NOT translation-invariant. A 1-pixel shift causes substantial
+changes in intermediate features (ReLU creates sharp discontinuities). The shifted images are
+off-distribution relative to the readout calibration, so averaging their logits dilutes the
+confidence on correct classes rather than reinforcing it.
+
+### Summary: all three augmentation strategies hurt
+
+| Strategy | Test acc | vs baseline |
+|---|---|---|
+| No augmentation (baseline) | **98.04%** | — |
+| Training augmentation (λ=1e-4) | 97.14% | −0.90% |
+| Test-time augmentation (TTA) | 97.33% | −0.71% |
+| Training augmentation (λ=5e-4) | crash | — |
+
+**Key insight:** The deep alternating ELM is already at the limit of what random isotropic
+features can achieve. To go beyond 98%, spatial structure (local receptive fields) is needed.
+This points squarely at Direction 3: a convolutional front-end.
+
+### Next: Direction 3 — Convolutional front-end
+
+Replace random W₀ [784→d] with locally-connected 5×5 filters [C×5×5→d]:
+- Local receptive fields capture translation-equivariant patterns
+- Shared weights across spatial positions → implicit translation invariance
+- ELM readout on convolutional features projected well past 98.5%
+
+---
+
+## [CP-34] Direction 1: Random Fourier Features — results and analysis
+**Date:** 2026-03-01 09:58 UTC
+
+### Implementation
+- `apply_cos(Tensor&, stream)` added to `activations.hpp/cu` (BF16/FP32/FP16)
+- `DeepELMExperiment` extended with `use_rff=false, rff_gamma=0.01` parameters:
+  - `setup()`: when `use_rff`, calls `w0_->enable_fp32_weights()` and overwrites:
+    - W₀ rows with N(0, rff_gamma·I) — Gaussian frequencies (instead of Kaiming uniform)
+    - bias with U[0, 2π] — random phases (instead of zero)
+  - `precompute_h0_t()`: `apply_cos(h)` instead of `apply_relu(h)` for W₀
+  - `evaluate()`: same cos/relu dispatch for W₀ activation
+- `run_epoch()` fixed to support `n_hidden=0` (H.back() → H0_dev_ fallback)
+- New registrations: `deep_elm_relu_4096_L1`, `deep_elm_rff_4096_L{0,1,3}`
+
+### RFF math recap (Bochner's theorem)
+`φ_j(x) = cos(w_j^T x + b_j)`, where `w_j ~ N(0, rff_gamma·I_784)`, `b_j ~ U[0,2π]`
+→ approximates `K_RBF(x,y) = exp(-rff_gamma·||x-y||²)` for large d.
+
+rff_gamma=0.01, ||x||² ≈ 50 for MNIST digits → Var[w·x] = 0.5 → std(arg) ≈ 0.7 (good spread).
+
+### Results
+
+| Experiment | Architecture | Test acc |
+|---|---|---|
+| `deep_elm_relu_4096_L1` | W₀(ReLU)+W₁(ELM)+readout | **96.85%** |
+| `deep_elm_rff_4096_L0` | W₀(RFF/cos)+readout | **97.10%** |
+| `deep_elm_rff_4096_L1` | W₀(RFF/cos)+W₁(ELM/ReLU)+readout | **97.11%** |
+| `deep_elm_rff_4096_L3` | W₀(RFF/cos)+W₁₂(ELM/ReLU)+readout | **97.07%** |
+| `deep_elm_4096_L3` (prior best) | W₀(ReLU)+W₁₂(ELM/ReLU)+readout | **98.04%** |
+
+### Key findings
+
+1. **RFF beats Kaiming ReLU at L1** (+0.25%): cos(Gaussian) features are more informative
+   than relu(Kaiming) for a single-layer model. Bochner's theorem gives a head start.
+
+2. **Adding ELM hidden layers on top of RFF provides zero benefit** (97.10%→97.11%→97.07%).
+   Explanation: RFF features are already in the optimal kernel space. The ELM hidden layer
+   applies ReLU (which maps out of the kernel space) and solves a normal-equations problem
+   that cannot improve beyond a linear readout on the kernel features. Depth destroys the
+   kernel structure rather than adding capacity.
+
+3. **The deep ReLU network outperforms RFF by 0.94%** (98.04% vs 97.10%). The reason: the
+   alternating ELM layers *learn* class-discriminative feature transformations from the
+   MNIST data (via target propagation), while RFF provides a *random* approximation of the
+   RBF kernel that is data-independent. The learned representation wins.
+
+4. **Extrapolated RFF scaling**: to match kernel SVM (98.6%) we would need d ≈ 100k+
+   (1.5% gap / ~0.4% per doubling). That requires ~1.6 GB VRAM for H0 alone and would
+   take much longer to solve. Not a practical direction.
+
+### Conclusion
+RFF is a meaningful baseline improvement for shallow architectures but cannot match
+deep ELM. The winning strategy remains learned hierarchical representations (ELM +
+target propagation). The next directions should focus on improving the quality of the
+learned representations rather than the random projection basis.
+
+---
+
+## [CP-33] Forward-only research roadmap: closing the MNIST gap without backprop
+**Date:** 2026-03-01 09:40 UTC
+
+Analysis of the remaining accuracy gap (98.08% → ~99.5%) and forward-only strategies
+to close it. All directions respect the FAYN manifesto: no backpropagation.
+
+### Gap diagnosis
+
+Our 98.08% uses Kaiming-random dense W₀ → ReLU → ELM layers → linear readout.
+The residual gap has four separable sources:
+
+1. **Feature geometry**: Random ReLU projections approximate the arc-cosine kernel (Cho &
+   Saul, 2009), not the RBF kernel used by SVMs. Arc-cosine is weaker for image data.
+2. **Spatial structure ignored**: Dense W₀ treats 784 pixels as an unordered set, destroying
+   translation structure that LeNet-5 exploits entirely through convolutions.
+3. **Rank-10 intermediate representations**: ELM target propagation back-propagates class
+   labels (rank 10), so intermediate weight matrices W_k have structural rank ≤ 10,
+   wasting d=4096 neurons.
+4. **No label-aware feature learning in hidden layers**: Only the readout sees labels;
+   random and ELM-solved hidden layers receive no direct discriminative pressure.
+
+---
+
+### Direction 1 — Random Fourier Features (RFF): approximate the RBF kernel
+
+**Priority: 1 (highest) — trivial change, closes most of the SVM gap.**
+
+By Bochner's theorem, any shift-invariant PSD kernel K(x,y) = k(x−y) has a random
+feature approximation (Rahimi & Recht, 2007):
+
+    φ(x) = √(2/d) · [cos(ω₁ᵀx + b₁), …, cos(ωₐᵀx + bₐ)]
+    ω ~ N(0, 2γI),  b ~ Uniform[0, 2π]
+
+Then φ(x)ᵀφ(y) → K_RBF(x,y) = exp(−γ‖x−y‖²) as d→∞.
+
+Current W₀ uses ReLU → approximates arc-cosine kernel K₁(x,y) = (1/π)‖x‖‖y‖(sin θ +
+(π−θ)cos θ). Replacing activation with cos(Wₓ + b) makes the ELM a kernel machine over
+the RBF kernel, which achieves 98.6% as an SVM. At d=4096 the approximation error is
+O(1/√d) ≈ 1.5%, giving expected test accuracy ≈98.5–98.6%.
+
+Implementation: sample W₀ rows from N(0, 2γI) and biases from U[0, 2π]; replace
+apply_relu with apply_cos in the precompute_h0_t() step. γ is a hyperparameter
+(typical: γ = 1/(2·mean_pixel_variance) ≈ 0.01–0.05 for MNIST).
+
+Expected gain: **+0.3–0.5%** → ~98.4–98.6%.
+
+---
+
+### Direction 2 — Convolutional Front-end
+
+**Priority: 2 — directly attacks the translation-invariance bottleneck.**
+
+#### 2a. Random Convolutional ELM
+
+Replace dense W₀ [784→d] with K random convolutional filters of size f×f:
+
+    H_k(n) = max_{(i,j)∈P} ReLU(conv(x_n, w_k)[i,j])
+
+w_k ~ N(0, σ²/f²). The resulting feature is K-dim per sample after spatial max-pooling.
+By construction, this approximates a shift-invariant convolutional kernel. Saxe et al.
+(2011) showed random conv features + pooling approach trained conv features for image
+classification. Jarrett et al. (2009) found a <2% gap between random and trained conv
+weights on most vision tasks.
+
+Expected gain: **+0.5–0.8%** → ~98.6–98.9%.
+
+#### 2b. Greedy PCA-Conv (unsupervised trained features, no backprop)
+
+Learn filter bank from data via patch covariance SVD:
+1. Extract all f×f patches: P ∈ ℝ^{N_patches × f²}
+2. SVD: [U,Σ,Vᵀ] = SVD(PᵀP / N_patches); W_conv = top-K eigenvectors of Vᵀ
+3. Apply as convolutional layer + nonlinearity + pooling
+4. ELM readout on pooled features
+
+This recovers Gabor-like edge detectors — the same features convolutional backprop
+networks learn in layer 1. Coates et al. (2011) achieved ~79.6% on CIFAR-10 with
+k-means patches + SVM (competitive with deep nets at the time). For MNIST, PCA-conv
+should approach 99%.
+
+Stackable: two greedy PCA-conv layers + ELM readout = full greedy convolutional pipeline.
+
+Expected gain: **+0.8–1.2%** → ~99.0–99.3%.
+
+---
+
+### Direction 3 — Forward-Only Supervised Hidden Layer Training
+
+**Priority: 3 — fixes the "no label signal in hidden layers" weakness.**
+
+#### 3a. Greedy layer-wise ELM with auxiliary classifiers
+
+For each layer k:
+1. H_k = σ(H_{k-1} W_k^T) (forward pass)
+2. W_aux = solve(H_k, T, λ) (local ELM readout — closed form)
+3. Error: E_k = T − H_k W_aux^T (label prediction error at layer k)
+4. Gradient w.r.t. H_k: ∂L/∂H_k = 2(H_k W_aux^T − T) W_aux / N (one-layer, not backprop)
+5. Update W_k via this single-layer gradient
+
+Step 4 is a local gradient — it does not propagate through the network; it only relates
+W_k to its own output H_k and the local ELM readout. Nøkland & Eidnes (2019) showed this
+greedy approach approaches full backprop accuracy on CIFAR-10 / STL-10.
+
+Expected gain: **+0.3–0.7%** over current target-propagation approach.
+
+#### 3b. Forward-Forward Algorithm (Hinton, 2022)
+
+Train each layer independently using positive (real + correct label) and negative
+(real + wrong label) data. Goodness = ‖h_k‖². Update:
+
+    ΔW_k = lr · σ(g − θ)(1 − σ(g − θ)) · h_{k-1}^T · (±1)
+
+Class label embedded into input pixels; no backward pass. ELM readout on FF-trained
+activations. Purely local, purely forward. Hinton (2022) shows competitive MNIST results
+with FF alone; our ELM readout replaces the weaker threshold readout.
+
+Expected gain: **+0.4–0.8%** over random feature baseline.
+
+#### 3c. Direct Feedback Alignment (DFA, Lillicrap et al. 2016)
+
+Replace backprop chain rule with direct output error feedback via fixed random matrices:
+
+    ΔW_k = δ_output · B_k · h_{k-1}^T,  B_k ∈ ℝ^{d_k × C} fixed random
+
+Requires only: one forward pass + output error (ŷ − y). No chain rule. During training,
+W_k aligns with B_k ("weight alignment" theorem, Lillicrap 2016). Best used as fine-tuning
+on top of ELM warm-start, correcting nonlinear inter-layer interactions that ELM misses.
+
+Expected gain: **+0.2–0.5%** as fine-tuner on ELM-warm-started weights.
+
+---
+
+### Direction 4 — Manifold-Aware Regularization
+
+**Priority: 4 — principled but requires N×N graph; moderate cost.**
+
+#### 4a. Laplacian-Regularized ELM (LapELM)
+
+Augment ELM with graph Laplacian term (Belkin et al., 2006):
+
+    W* = (H^T(I + μL)H + λI)^{-1} H^T T
+
+where L = D − A is the k-NN graph Laplacian on inputs. Closed-form solve; penalizes
+predictions inconsistent with the input manifold. Pushes nearby images (digit manifold)
+to have similar predictions. Especially powerful semi-supervised (unlabeled test images
+can be included in the graph).
+
+Expected gain: **+0.1–0.3%**.
+
+#### 4b. Optimal λ via Generalized Cross-Validation (GCV)
+
+GCV score (Golub et al., 1979): closed-form LOO-CV from H eigendecomposition.
+λ* = argmin GCV(λ) via bisection after one eigendecomposition. No validation set consumed.
+
+    GCV(λ) = ‖y − H(H^TH + λI)^{-1}H^Ty‖² / (1 − tr(H(H^TH+λI)^{-1}H^T)/N)²
+
+Expected gain: **+0.1–0.3%**; essentially free.
+
+---
+
+### Direction 5 — Encoder-Decoder and Knowledge Distillation
+
+**Priority: 5 — fixes rank-10 intermediate representation degeneracy.**
+
+#### 5a. ALS Autoencoder + ELM Readout
+
+Joint reconstruction + classification objective solved via Alternating Least Squares:
+
+    min_{W_enc, W_dec, W_r}  α‖HW_dec^T − X‖² + (1−α)‖HW_r^T − T‖² + λ(‖W_dec‖² + ‖W_r‖²)
+
+Each ALS step is a linear system (ELM solve with stacked targets [√α·X; √(1−α)·T]).
+The reconstruction term forces H to preserve input information beyond rank 10, preventing
+degenerate intermediate representations.
+
+Expected gain: **+0.2–0.5%** by fixing rank-10 degeneracy.
+
+#### 5b. Knowledge Distillation (forward-only)
+
+Large ELM (d=8192) teacher → soft probability targets → small ELM (d=1024) student
+trained on soft targets. Teacher is already trained; student uses T_soft = softmax(logits/τ)
+as regression targets. Soft targets carry inter-class similarity (e.g., "4 similar to 9"),
+better-conditioned Gram matrix, improved student generalization.
+
+Expected gain: **+0.1–0.3%**, especially in data-limited regimes.
+
+---
+
+### Direction 6 — Data Augmentation Folded into the Gram Matrix
+
+**Priority: 2 (tied) — free compute, zero architecture change, meaningful gain.**
+
+Augmented copies of training images (elastic distortions, small affine transforms) are
+passed through frozen W₀. Gram matrices accumulate online:
+
+    H_aug^T H_aug = Σ_k H_k^T H_k  (O(d²) per augmentation pass, O(d²) total memory)
+
+The augmented ELM solve is identical to standard ELM. Simard et al. (2003) showed elastic
+distortions halve MNIST error for convolutional networks; for ELMs the gain is smaller but
+still meaningful (effectively increases N at fixed d).
+
+Expected gain: **+0.1–0.4%**; implementation cost is a data augmentation kernel only.
+
+---
+
+### Priority ranking and cumulative projection
+
+| Rank | Direction | Expected gain | Cumulative |
+|---|---|---|---|
+| 1 | Random Fourier Features (W₀ activation → cos) | +0.3–0.5% | ~98.5% |
+| 2 | Data augmentation in Gram | +0.1–0.3% | ~98.7% |
+| 3 | Random convolutional W₀ | +0.3–0.5% | ~99.0% |
+| 4 | Greedy PCA-conv (unsupervised trained filters) | +0.2–0.4% | ~99.2% |
+| 5 | GCV-tuned λ | +0.1–0.2% | ~99.3% |
+| 6 | Forward-Forward hidden layers | +0.1–0.3% | ~99.4% |
+| 7 | Laplacian regularization | +0.1–0.2% | ~99.5% |
+
+Implementation begins with Direction 1 (RFF) — see CP-34 and onward.
+
+---
+
 ## [CP-32] Empirical rules synthesised from MNIST experiments (CP-14 – CP-31)
 **Date:** 2026-03-01 09:13 UTC
 

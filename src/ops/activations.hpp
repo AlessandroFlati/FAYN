@@ -49,6 +49,7 @@ void apply_gelu              (Tensor& x, cudaStream_t stream = nullptr);
 void apply_silu              (Tensor& x, cudaStream_t stream = nullptr);
 void apply_tanh              (Tensor& x, cudaStream_t stream = nullptr);
 void apply_sigmoid           (Tensor& x, cudaStream_t stream = nullptr);
+void apply_cos               (Tensor& x, cudaStream_t stream = nullptr);
 
 // ---------------------------------------------------------------------------
 // ADMM utility kernels (FP32, CUDA only).

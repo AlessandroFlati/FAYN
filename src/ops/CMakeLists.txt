@@ -1,5 +1,6 @@
 add_library(fayn_ops STATIC
     activations.cu
+    conv_frontend.cu
     dense.cu
     hebbian.cu
     one_hot.cu

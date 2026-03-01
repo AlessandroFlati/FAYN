@@ -674,6 +674,447 @@ namespace {
         });
     return true;
 }();
+// ---------------------------------------------------------------------------
+// Random Fourier Features (RFF): W_0 rows ~ N(0, rff_gamma * I_784),
+// activation = cos(W_0 x + b), b ~ U[0, 2π].
+//
+// By Bochner's theorem (Rahimi & Recht, 2007), this approximates:
+//   K_RBF(x,y) = exp(-rff_gamma * ||x-y||^2)
+//
+// rff_gamma=0.01: ||x||^2 ≈ 50-100 for digit images → Var[w·x] ≈ 0.5-1.0
+//   → cos argument std ≈ 0.7-1.0 (good frequency spread across the dataset).
+//
+// L0 = pure kernel ridge regression (no ELM hidden layer), direct comparison
+//      with kernel SVM (98.6%). L1/L3 add ELM depth on top of the RFF basis.
+// ReLU L1 baseline (d=4096) added for fair single-layer comparison.
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Training-time augmentation: each training image is accompanied by 4 pixel-
+// shifted copies (left/right/up/down by 1 pixel).  The ELM fit sees a 5×
+// larger H matrix (299520 rows instead of 59904) with the same labels.
+// The Gram computation cost scales as O(N·d²) so it is 5× more expensive,
+// but the solve (O(d³)) is unchanged.  Inference uses the original images.
+//
+// Expected gain over pure ELM: ~+0.3-0.5% from improved translation-invariance.
+// ---------------------------------------------------------------------------
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_aug_4096_L3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_aug_4096_L3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/true);
+        });
+    return true;
+}();
+// RFF + augmentation: kernel features with 5× training coverage.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_rff_aug_4096_L0 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_rff_aug_4096_L0",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/0, /*n_cycles=*/1,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/true,
+                /*rff_gamma=*/0.01f, /*augment=*/true);
+        });
+    return true;
+}();
+// ---------------------------------------------------------------------------
+// Wider frozen projection: d0=8192 (2× more random features), ELM d=4096.
+// Tests whether a richer random basis improves over d0=4096.
+// First ELM layer compresses 8192 → 4096 (dimensionality reduction).
+// H0^T H0 is [8192, 8192] → 256 MB, feasible.
+// ---------------------------------------------------------------------------
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_8192_4096_L3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_8192_4096_L3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/8192, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+// λ=1e-3: stronger regularisation to close the train/test gap seen at λ=1e-4.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_8192_4096_L3_lam1e3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_8192_4096_L3_lam1e3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/8192, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-3f);
+        });
+    return true;
+}();
+// λ=1e-2: even stronger regularisation.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_8192_4096_L3_lam1e2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_8192_4096_L3_lam1e2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/8192, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-2f);
+        });
+    return true;
+}();
+// Augmentation with properly scaled lambda: 5× more samples → λ × 5 to maintain
+// the same effective regularisation per sample (H^T H eigenvalues scale as N).
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_aug_4096_L3_lam5 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_aug_4096_L3_lam5",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/5e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/true);
+        });
+    return true;
+}();
+// Deep ReLU L5 at d=4096: 4 ELM hidden layers + readout. Tests whether depth
+// benefit continues past L3 (98.04%) at d=4096, before implementing augmentation.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_relu_4096_L5 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_relu_4096_L5",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/4, /*n_cycles=*/5,
+                /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+// ReLU L1 at d=4096: baseline for single ELM hidden layer at this width.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_relu_4096_L1 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_relu_4096_L1",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/1, /*n_cycles=*/5,
+                /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+// RFF L0: W_0 cos features → linear readout only (kernel ridge regression).
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_rff_4096_L0 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_rff_4096_L0",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/0, /*n_cycles=*/1,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/true, /*rff_gamma=*/0.01f);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_rff_4096_L1 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_rff_4096_L1",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/1, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/true, /*rff_gamma=*/0.01f);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_rff_4096_L3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_rff_4096_L3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/true, /*rff_gamma=*/0.01f);
+        });
+    return true;
+}();
+// Convolutional front-end experiments.
+// Replace W_0 [784→d0] with 5×5 conv (C_out filters) + ReLU + 2×2 max-pool.
+// Output: C_out * 12 * 12 features. Kaiming-init frozen filters.
+//
+// deep_elm_conv32_L1: C_out=32, d0=4608, d=4096, 1 ELM hidden layer + readout.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv32_L1 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv32_L1",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4608, /*d=*/4096, /*n_hidden=*/1, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/false, /*use_tta=*/false,
+                /*use_conv=*/true, /*conv_c_out=*/32);
+        });
+    return true;
+}();
+// deep_elm_conv32_L3: C_out=32, d0=4608, d=4096, 2 ELM hidden layers + readout.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv32_L3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv32_L3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4608, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/false, /*use_tta=*/false,
+                /*use_conv=*/true, /*conv_c_out=*/32);
+        });
+    return true;
+}();
+// deep_elm_conv64_L1: C_out=64, d0=9216, d=4096, 1 ELM hidden layer + readout.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_L1 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_L1",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/9216, /*d=*/4096, /*n_hidden=*/1, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/false, /*use_tta=*/false,
+                /*use_conv=*/true, /*conv_c_out=*/64);
+        });
+    return true;
+}();
+// deep_elm_conv64_L3: C_out=64, d0=9216, d=4096, 2 ELM hidden layers + readout.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_L3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_L3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/9216, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/false, /*use_tta=*/false,
+                /*use_conv=*/true, /*conv_c_out=*/64);
+        });
+    return true;
+}();
+// deep_elm_conv128_L1: C_out=128, d0=18432, d=4096, 1 ELM hidden layer + readout.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv128_L1 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv128_L1",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/18432, /*d=*/4096, /*n_hidden=*/1, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/false, /*use_tta=*/false,
+                /*use_conv=*/true, /*conv_c_out=*/128);
+        });
+    return true;
+}();
+// Regularization sweep for conv64_L3 to close the 1.26% train-test gap.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_L3_lam5e4 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_L3_lam5e4",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/9216, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/5e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/false, /*use_tta=*/false,
+                /*use_conv=*/true, /*conv_c_out=*/64);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_L3_lam1e3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_L3_lam1e3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/9216, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-3f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/false, /*use_tta=*/false,
+                /*use_conv=*/true, /*conv_c_out=*/64);
+        });
+    return true;
+}();
+
+// deep_elm_conv64_L1_learned: C_out=64 conv filters updated by ELM solve each cycle,
+// 1 ELM hidden layer + readout. Tests whether learning conv improves over frozen.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_L1_learned = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_L1_learned",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/9216, /*d=*/4096, /*n_hidden=*/1, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/false, /*use_tta=*/false,
+                /*use_conv=*/true, /*conv_c_out=*/64, /*learn_conv=*/true);
+        });
+    return true;
+}();
+// deep_elm_conv64_L3_learned: C_out=64 learned conv, 2 ELM hidden layers + readout.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_L3_learned = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_L3_learned",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/9216, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/false, /*use_tta=*/false,
+                /*use_conv=*/true, /*conv_c_out=*/64, /*learn_conv=*/true);
+        });
+    return true;
+}();
+
+// ---------------------------------------------------------------------------
+// Deep ELM ensemble: M independent random projections W_0, each with their
+// own ELM-solved hidden + readout. Inference averages logits over all members.
+// ---------------------------------------------------------------------------
+// 5 members, each d0=4096, d=4096, 1 hidden ELM layer + readout (L2 net).
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_ensemble_5x4096_L2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_ensemble_5x4096_L2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/5, /*d0=*/4096, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+// 3 members, each d0=4096, d=4096, 2 hidden ELM layers + readout (L3 net).
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_ensemble_3x4096_L3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_ensemble_3x4096_L3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/3, /*d0=*/4096, /*d=*/4096,
+                /*n_hidden=*/2, /*n_cycles=*/5, /*lambda=*/1e-4f);
+        });
+    return true;
+}();
+
+// Multi-scale conv ensemble: 3 members with K=3, K=5, K=7 (one per scale), n_hidden=1 (L2).
+// d0 per member: 64×169=10816 (K=3), 64×144=9216 (K=5), 64×121=7744 (K=7).
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_multiscale3_ensemble_3xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_multiscale3_ensemble_3xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/3, /*d0=*/0, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{3, 5, 7});
+        });
+    return true;
+}();
+// Multi-scale conv ensemble: 6 members with K=[3,3,5,5,7,7], n_hidden=1 (L2).
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_multiscale3_ensemble_6xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_multiscale3_ensemble_6xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/6, /*d0=*/0, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{3, 3, 5, 5, 7, 7});
+        });
+    return true;
+}();
+
+// Conv64 ensemble: 3 members, C_out=64, n_hidden=2 (L3 net), n_cycles=5.
+// d0=9216 (64 filters × 144 spatial positions after 2×2 max-pool).
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_ensemble_3xL3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_ensemble_3xL3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/3, /*d0=*/9216, /*d=*/4096,
+                /*n_hidden=*/2, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64);
+        });
+    return true;
+}();
+// Conv64 ensemble: 5 members, C_out=64, n_hidden=1 (L2 net), n_cycles=5.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/5, /*d0=*/9216, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64);
+        });
+    return true;
+}();
+// Conv64 ensemble: 10 members, C_out=64, n_hidden=1 (L2 net), n_cycles=5.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_ensemble_10xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_ensemble_10xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/10, /*d0=*/9216, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64);
+        });
+    return true;
+}();
+
+// Feature-level augmentation: compute H0 on 5 views (original + 4 shifts), solve ELM
+// on the augmented [5*N_fit, d0] feature matrix. Target propagation unchanged (stable).
+// 5-member conv64 L2 with augmentation.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_aug_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_aug_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/5, /*d0=*/9216, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*use_aug=*/true);
+        });
+    return true;
+}();
+// 10-member conv64 L2 with feature-level augmentation.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_aug_ensemble_10xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_aug_ensemble_10xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/10, /*d0=*/9216, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*use_aug=*/true);
+        });
+    return true;
+}();
+
+// Test-time augmentation (TTA): average logits over original + 4 pixel-shifted views.
+// Same trained model as deep_elm_4096_L3; only inference changes.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_tta_4096_L3 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_tta_4096_L3",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/4096, /*d=*/4096, /*n_hidden=*/2, /*n_cycles=*/5,
+                /*lambda=*/1e-4f, /*use_tanh=*/false, /*use_rff=*/false,
+                /*rff_gamma=*/0.01f, /*augment=*/false, /*use_tta=*/true);
+        });
+    return true;
+}();
 }
 
 static void print_usage(const char* prog) {

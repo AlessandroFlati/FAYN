@@ -56,6 +56,11 @@ __device__ __forceinline__ T sigmoid_fn(T x) {
     return T(1.0f / (1.0f + expf(-static_cast<float>(x))));
 }
 
+template<typename T>
+__device__ __forceinline__ T cos_fn(T x) {
+    return T(cosf(static_cast<float>(x)));
+}
+
 // ---------------------------------------------------------------------------
 // Generic in-place activation kernel
 // ---------------------------------------------------------------------------
@@ -297,6 +302,13 @@ void apply_sigmoid(Tensor& x, cudaStream_t stream) {
         []__device__(__half v)           { return sigmoid_fn(v); },
         []__device__(__nv_bfloat16 v)    { return sigmoid_fn(v); },
         []__device__(float v)            { return sigmoid_fn(v); });
+}
+
+void apply_cos(Tensor& x, cudaStream_t stream) {
+    dispatch_by_dtype(x, stream,
+        []__device__(__half v)           { return cos_fn(v); },
+        []__device__(__nv_bfloat16 v)    { return cos_fn(v); },
+        []__device__(float v)            { return cos_fn(v); });
 }
 
 // ---------------------------------------------------------------------------

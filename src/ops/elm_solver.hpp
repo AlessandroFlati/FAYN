@@ -275,44 +275,46 @@ public:
             throw std::invalid_argument(
                 "ElmSolver::propagate_target: W.shape[0] must equal T.shape[1]");
 
-        if (d_out != d_in) {
-            // Non-square W (readout [10, d]): CPU Gram path.
+        // Use CPU path only for very small d_out (e.g., readout [10, d]).
+        // Large non-square W (e.g., hidden_[0] [d_, d0_]) uses GPU Gram path.
+        if (d_out != d_in && d_out < 64) {
             return propagate_target_cpu(W, T);
         }
 
-        if (use_direct_lu) {
+        if (d_out == d_in && use_direct_lu) {
             // Square W [d, d]: direct LU path (no Gram matrix).
             return propagate_target_lu(W, T);
         }
 
-        // Square W [d, d]: GPU regularized Gram path.
-        // H_target = T @ (W W^T + lambda_prop*I)^{-1} @ W   [N, d]
-        const int d = d_out;
+        // GPU regularized Gram path — works for any W [d_out, d_in].
+        // H_target = T @ (W W^T + lambda_prop*I)^{-1} @ W   [N, d_in]
         const float alpha = 1.f, beta = 0.f;
 
-        // Step 1: G = W @ W^T  [d, d]
-        // cublasSgemm(OP_T, OP_N, d, d, d, W_rm, W_rm, G):
-        //   G_cm = (W^T_cm)^T @ W^T_cm = W_rm @ W_rm^T = W @ W^T ✓
+        // Step 1: G = W @ W^T  [d_out, d_out]
+        // W_rm [d_out, d_in] as col-major [d_in, d_out]:
+        //   cublasSgemm(OP_T, OP_N, d_out, d_out, d_in, W_rm, d_in, W_rm, d_in, G, d_out):
+        //   G_cm = (W_cm^T)^T @ W_cm = W @ W^T ✓
         Tensor G = Tensor::make(
-            {static_cast<size_t>(d), static_cast<size_t>(d)}, DType::Float32, Device::CUDA);
+            {static_cast<size_t>(d_out), static_cast<size_t>(d_out)},
+            DType::Float32, Device::CUDA);
         FAYN_CUBLAS_CHECK(cublasSgemm(
             cublas_, CUBLAS_OP_T, CUBLAS_OP_N,
-            d, d, d, &alpha,
-            static_cast<const float*>(W.data), d,
-            static_cast<const float*>(W.data), d,
-            &beta, static_cast<float*>(G.data), d));
+            d_out, d_out, d_in, &alpha,
+            static_cast<const float*>(W.data), d_in,
+            static_cast<const float*>(W.data), d_in,
+            &beta, static_cast<float*>(G.data), d_out));
 
-        // Step 2: G += lambda_prop * I  (ones vector with incy = d+1 hits diagonal)
+        // Step 2: G += lambda_prop * I
         {
-            std::vector<float> ones_h(static_cast<size_t>(d), 1.f);
+            std::vector<float> ones_h(static_cast<size_t>(d_out), 1.f);
             Tensor ones_dev = Tensor::make(
-                {static_cast<size_t>(d)}, DType::Float32, Device::CUDA);
+                {static_cast<size_t>(d_out)}, DType::Float32, Device::CUDA);
             FAYN_CUDA_CHECK(cudaMemcpy(ones_dev.data, ones_h.data(),
-                static_cast<size_t>(d) * sizeof(float), cudaMemcpyHostToDevice));
+                static_cast<size_t>(d_out) * sizeof(float), cudaMemcpyHostToDevice));
             FAYN_CUBLAS_CHECK(cublasSaxpy(
-                cublas_, d, &lambda_prop,
+                cublas_, d_out, &lambda_prop,
                 static_cast<const float*>(ones_dev.data), 1,
-                static_cast<float*>(G.data), d + 1));
+                static_cast<float*>(G.data), d_out + 1));
         }
 
         FAYN_CUDA_CHECK(cudaDeviceSynchronize());
@@ -322,13 +324,13 @@ public:
         FAYN_CUDA_CHECK(cudaMalloc(&devInfo, sizeof(int)));
         int lwork = 0;
         FAYN_CUSOLVER_CHECK(cusolverDnSpotrf_bufferSize(
-            cusolver_, CUBLAS_FILL_MODE_LOWER, d,
-            static_cast<float*>(G.data), d, &lwork));
+            cusolver_, CUBLAS_FILL_MODE_LOWER, d_out,
+            static_cast<float*>(G.data), d_out, &lwork));
         Tensor workspace = Tensor::make(
             {static_cast<size_t>(std::max(lwork, 1))}, DType::Float32, Device::CUDA);
         FAYN_CUSOLVER_CHECK(cusolverDnSpotrf(
-            cusolver_, CUBLAS_FILL_MODE_LOWER, d,
-            static_cast<float*>(G.data), d,
+            cusolver_, CUBLAS_FILL_MODE_LOWER, d_out,
+            static_cast<float*>(G.data), d_out,
             static_cast<float*>(workspace.data), lwork, devInfo));
 
         {
@@ -345,33 +347,34 @@ public:
             }
         }
 
-        // Step 4: Solve G @ X = T^T in-place.
-        // T_copy_rm[N,d] passed as col-major [d,N] = T^T_cm.
-        // After Spotrs: T_copy contains G^{-1} T^T (col-major [d,N]).
+        // Step 4: Solve (W W^T + λI) X = T^T in-place.
+        // T_copy_rm [N, d_out] as col-major [d_out, N] = T^T.
+        // After Spotrs: T_copy = (W W^T + λI)^{-1} T^T  (col-major [d_out, N]).
         Tensor T_copy = Tensor::make(
-            {static_cast<size_t>(N), static_cast<size_t>(d)}, DType::Float32, Device::CUDA);
+            {static_cast<size_t>(N), static_cast<size_t>(d_out)}, DType::Float32, Device::CUDA);
         FAYN_CUDA_CHECK(cudaMemcpy(T_copy.data, T.data,
-            static_cast<size_t>(N) * d * sizeof(float), cudaMemcpyDeviceToDevice));
+            static_cast<size_t>(N) * d_out * sizeof(float), cudaMemcpyDeviceToDevice));
         FAYN_CUSOLVER_CHECK(cusolverDnSpotrs(
-            cusolver_, CUBLAS_FILL_MODE_LOWER, d, N,
-            static_cast<const float*>(G.data), d,
-            static_cast<float*>(T_copy.data), d, devInfo));
+            cusolver_, CUBLAS_FILL_MODE_LOWER, d_out, N,
+            static_cast<const float*>(G.data), d_out,
+            static_cast<float*>(T_copy.data), d_out, devInfo));
 
         FAYN_CUDA_CHECK(cudaDeviceSynchronize());
         cudaFree(devInfo);
 
-        // Step 5: H_target_cm[d,N] = W^T_cm @ (G^{-1}T^T)_cm = W^T G^{-1} T^T = H_target^T
-        // cublasSgemm(OP_N, OP_N, d, N, d, W_rm, d, T_copy, d, H_target, d):
-        //   C_cm[d,N] = W_cm[d,d] @ T_copy_cm[d,N] = W^T @ G^{-1}T^T = H_target^T ✓
-        //   Read C as row-major [N,d] = H_target ✓
+        // Step 5: H_target = W^T @ (W W^T + λI)^{-1} T^T   [d_in × N] → [N, d_in]
+        //
+        // W_rm [d_out, d_in] with lda=d_in → cuBLAS sees W^T [d_in, d_out]  (OP_N)
+        // T_copy_rm [N, d_out] with lda=d_out → T_copy^T [d_out, N]          (OP_N)
+        // H_target_cm [d_in, N] → read row-major = H_target_rm [N, d_in]     ✓
         Tensor H_target = Tensor::make(
-            {static_cast<size_t>(N), static_cast<size_t>(d)}, DType::Float32, Device::CUDA);
+            {static_cast<size_t>(N), static_cast<size_t>(d_in)}, DType::Float32, Device::CUDA);
         FAYN_CUBLAS_CHECK(cublasSgemm(
             cublas_, CUBLAS_OP_N, CUBLAS_OP_N,
-            d, N, d, &alpha,
-            static_cast<const float*>(W.data), d,
-            static_cast<const float*>(T_copy.data), d,
-            &beta, static_cast<float*>(H_target.data), d));
+            d_in, N, d_out, &alpha,
+            static_cast<const float*>(W.data), d_in,
+            static_cast<const float*>(T_copy.data), d_out,
+            &beta, static_cast<float*>(H_target.data), d_in));
 
         FAYN_CUDA_CHECK(cudaDeviceSynchronize());
         return H_target;
@@ -409,6 +412,41 @@ public:
 
         FAYN_CUDA_CHECK(cudaStreamSynchronize(nullptr));
         return H_out;
+    }
+
+    // -----------------------------------------------------------------------
+    // matmul: C = A @ B  (no transpose)  — FP32, CUDA.
+    //
+    // A: FP32 [N, K] on device
+    // B: FP32 [K, M] on device
+    // Returns C: FP32 [N, M] on device
+    // -----------------------------------------------------------------------
+    Tensor matmul(const Tensor& A, const Tensor& B) const {
+        if (A.dtype != DType::Float32 || B.dtype != DType::Float32)
+            throw std::invalid_argument("ElmSolver::matmul: tensors must be Float32");
+        const int N = static_cast<int>(A.shape[0]);
+        const int K = static_cast<int>(A.shape[1]);
+        const int M = static_cast<int>(B.shape[1]);
+        if (K != static_cast<int>(B.shape[0]))
+            throw std::invalid_argument("ElmSolver::matmul: inner dimensions must match");
+
+        Tensor C = Tensor::make(
+            {static_cast<size_t>(N), static_cast<size_t>(M)}, DType::Float32, Device::CUDA);
+        const float alpha = 1.f, beta = 0.f;
+
+        // C_rm [N, M] = A_rm [N, K] × B_rm [K, M]
+        // cuBLAS col-major: C_cm [M, N] = B_cm [M, K] × A_cm [K, N]
+        //   B_rm [K, M] as col-major [M, K], OP_N  (leading dim = M)
+        //   A_rm [N, K] as col-major [K, N], OP_N  (leading dim = K)
+        FAYN_CUBLAS_CHECK(cublasSgemm(
+            cublas_, CUBLAS_OP_N, CUBLAS_OP_N,
+            M, N, K, &alpha,
+            static_cast<const float*>(B.data), M,
+            static_cast<const float*>(A.data), K,
+            &beta, static_cast<float*>(C.data), M));
+
+        FAYN_CUDA_CHECK(cudaStreamSynchronize(nullptr));
+        return C;
     }
 
     // -----------------------------------------------------------------------
