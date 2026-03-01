@@ -230,31 +230,40 @@ public:
     }
 
     // -----------------------------------------------------------------------
-    // propagate_target: H_target = T @ (W W^T + lambda_prop*I)^{-1} @ W
+    // propagate_target: H_target such that H_target @ W^T ≈ T.
     //
-    // For square W [d, d] (intermediate hidden layers): GPU regularized Gram + Cholesky.
-    // For non-square W [d_out, d_in] with d_out ≠ d_in (readout [10, d]): CPU path.
+    // Two paths for square W [d, d]:
+    //   use_direct_lu=false (default): GPU regularized Gram + Cholesky.
+    //     H_target = T @ (W W^T + lambda_prop*I)^{-1} @ W
+    //     Safe for rank-deficient W (deep_elm: W has rank ≤ n_classes after
+    //     propagating through the 10-class readout). lambda_prop must be > 0.
+    //     Can fail numerically when ||W||_F is large (GEMM roundoff in W W^T
+    //     overwhelms lambda_prop), as seen in ADMM with saturated tanh targets.
+    //   use_direct_lu=true: GPU direct LU on W (no Gram matrix formed).
+    //     H_target = T @ W^{-T}  — exact for invertible W.
+    //     Avoids squaring the condition number; numerically stable even when
+    //     ||W||_F >> 1. Fails if W is singular or nearly so.
+    //     Use when W is guaranteed full-rank (ADMM W solved from N >> d samples).
     //
-    // W:           FP32 [d_out, d_in] on device  (DenseLayer weight format)
-    // T:           FP32 [N, d_out]    on device
-    // lambda_prop: Tikhonov regularization for (W W^T + λI); must be > 0.
-    //              Ensures Cholesky succeeds even for rank-deficient W
-    //              (e.g., W solved from sparse ReLU-clipped targets has rank ≤ n_classes).
-    //              Null-space contributions vanish in the final product because
-    //              null(W W^T) = null(W^T), so W applied to null-dir gives 0.
-    // Returns H_target: FP32 [N, d_in] on device
+    // For non-square W (readout [d_out, d_in] with d_out ≠ d_in): CPU path always.
     //
-    // GPU Gram math (all col-major via cuBLAS/cuSOLVER row-major duality):
+    // GPU Gram math (use_direct_lu=false, col-major via row-major duality):
     //   Step 1: G_cm = W_rm @ W_rm^T = W @ W^T  [cublasSgemm(OP_T,OP_N)]
     //   Step 2: G += lambda_prop * I             [cublasSaxpy diagonal]
-    //   Step 3: Cholesky factorize G (SPD)       [cusolverDnSpotrf]
-    //   Step 4: Solve G @ X = T^T in-place       [cusolverDnSpotrs on T_copy_rm as T^T_cm]
-    //           → T_copy now holds G^{-1}T^T as col-major [d,N]
-    //   Step 5: H_target_cm[d,N] = W^T_cm @ (G^{-1}T^T)_cm = W^T G^{-1} T^T = H_target^T
-    //           [cublasSgemm(OP_N,OP_N)] → read as row-major [N,d] = H_target ✓
+    //   Step 3: Cholesky factorize G             [cusolverDnSpotrf]
+    //   Step 4: Solve G @ X = T^T in-place       [cusolverDnSpotrs]
+    //   Step 5: H_target = W^T G^{-1} T^T        [cublasSgemm(OP_N,OP_N)]
+    //
+    // GPU LU math (use_direct_lu=true, col-major via row-major duality):
+    //   Step 1: LU factorize W_rm (seen as W^T_cm) [cusolverDnSgetrf]
+    //   Step 2: Solve (W^T_cm)^T X = T^T_cm, i.e., W X = T^T  [OP_T]
+    //           T_copy_rm [N,d] = T^T_cm [d,N] → after solve:
+    //           T_copy = W^{-1} T^T (col-major [d,N])
+    //           read as row-major [N,d] = T W^{-T} = H_target ✓
     // -----------------------------------------------------------------------
     Tensor propagate_target(const Tensor& W, const Tensor& T,
-                            float lambda_prop = 1e-4f) const {
+                            float lambda_prop = 1e-4f,
+                            bool  use_direct_lu = false) const {
         if (W.dtype != DType::Float32 || T.dtype != DType::Float32)
             throw std::invalid_argument(
                 "ElmSolver::propagate_target: tensors must be Float32");
@@ -269,6 +278,11 @@ public:
         if (d_out != d_in) {
             // Non-square W (readout [10, d]): CPU Gram path.
             return propagate_target_cpu(W, T);
+        }
+
+        if (use_direct_lu) {
+            // Square W [d, d]: direct LU path (no Gram matrix).
+            return propagate_target_lu(W, T);
         }
 
         // Square W [d, d]: GPU regularized Gram path.
@@ -407,6 +421,15 @@ public:
     }
 
     // -----------------------------------------------------------------------
+    // tanh_forward: H_out = tanh(H @ W^T)  — all FP32, all on device.
+    // -----------------------------------------------------------------------
+    Tensor tanh_forward(const Tensor& H, const Tensor& W) const {
+        Tensor H_out = linear_forward(H, W);
+        apply_tanh(H_out, /*stream=*/nullptr);
+        return H_out;
+    }
+
+    // -----------------------------------------------------------------------
     // relu_forward: H_out = ReLU(H @ W^T)  — all FP32, all on device.
     //
     // H:      FP32 [N, d_in]  on device
@@ -507,6 +530,76 @@ public:
     }
 
 private:
+    // -----------------------------------------------------------------------
+    // propagate_target_lu: GPU direct LU for square W [d, d].
+    //
+    // Solves W X = T^T for X, then returns H_target = X^T = T W^{-T}.
+    //
+    // cuSOLVER reads W_rm [d,d] as W^T_cm. After Sgetrf, we have LU(W^T).
+    // cusolverDnSgetrs(OP_T, d, N, ...): solves (W^T_cm)^T @ X = B → W @ X = T^T_cm
+    // → X_cm [d,N] = W^{-1} T^T; read as row-major [N,d] = T W^{-T} = H_target ✓
+    // -----------------------------------------------------------------------
+    Tensor propagate_target_lu(const Tensor& W, const Tensor& T) const {
+        const int d = static_cast<int>(W.shape[0]);
+        const int N = static_cast<int>(T.shape[0]);
+
+        // Working copy of W (LU factorization is in-place).
+        Tensor W_work = Tensor::make(
+            {static_cast<size_t>(d), static_cast<size_t>(d)}, DType::Float32, Device::CUDA);
+        FAYN_CUDA_CHECK(cudaMemcpy(W_work.data, W.data,
+            static_cast<size_t>(d) * d * sizeof(float), cudaMemcpyDeviceToDevice));
+
+        // Working copy of T (solve is in-place; T_copy_rm [N,d] is read as T^T_cm [d,N]).
+        Tensor T_copy = Tensor::make(
+            {static_cast<size_t>(N), static_cast<size_t>(d)}, DType::Float32, Device::CUDA);
+        FAYN_CUDA_CHECK(cudaMemcpy(T_copy.data, T.data,
+            static_cast<size_t>(N) * d * sizeof(float), cudaMemcpyDeviceToDevice));
+
+        int* devIpiv = nullptr;
+        int* devInfo = nullptr;
+        FAYN_CUDA_CHECK(cudaMalloc(&devIpiv, static_cast<size_t>(d) * sizeof(int)));
+        FAYN_CUDA_CHECK(cudaMalloc(&devInfo, sizeof(int)));
+
+        // LU factorize W_work.
+        int lwork = 0;
+        FAYN_CUSOLVER_CHECK(cusolverDnSgetrf_bufferSize(
+            cusolver_, d, d, static_cast<float*>(W_work.data), d, &lwork));
+        Tensor workspace = Tensor::make(
+            {static_cast<size_t>(std::max(lwork, 1))}, DType::Float32, Device::CUDA);
+        FAYN_CUSOLVER_CHECK(cusolverDnSgetrf(
+            cusolver_, d, d, static_cast<float*>(W_work.data), d,
+            static_cast<float*>(workspace.data), devIpiv, devInfo));
+
+        {
+            int devInfo_h = 0;
+            FAYN_CUDA_CHECK(cudaDeviceSynchronize());
+            FAYN_CUDA_CHECK(cudaMemcpy(&devInfo_h, devInfo, sizeof(int),
+                                       cudaMemcpyDeviceToHost));
+            if (devInfo_h != 0) {
+                cudaFree(devIpiv);
+                cudaFree(devInfo);
+                throw std::runtime_error(
+                    "ElmSolver::propagate_target_lu: LU factorization failed (devInfo=" +
+                    std::to_string(devInfo_h) +
+                    "). W is singular or nearly singular.");
+            }
+        }
+
+        // Solve (W^T_cm)^T @ X = T^T_cm, i.e., W @ X = T^T, in-place.
+        // After solve: T_copy_rm [N,d] = (W^{-1} T^T)^T = T W^{-T} = H_target ✓
+        FAYN_CUSOLVER_CHECK(cusolverDnSgetrs(
+            cusolver_, CUBLAS_OP_T, d, N,
+            static_cast<const float*>(W_work.data), d, devIpiv,
+            static_cast<float*>(T_copy.data), d, devInfo));
+
+        FAYN_CUDA_CHECK(cudaDeviceSynchronize());
+        cudaFree(devIpiv);
+        cudaFree(devInfo);
+
+        // T_copy is now H_target [N, d].
+        return T_copy;
+    }
+
     // -----------------------------------------------------------------------
     // propagate_target_cpu: CPU Gram path for non-square W [d_out, d_in].
     // Used for readout W [10, d] where d_out = 10 is tiny (loops are negligible).

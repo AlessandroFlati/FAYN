@@ -494,6 +494,174 @@ namespace {
         });
     return true;
 }();
+// ---------------------------------------------------------------------------
+// Depth vs. activation analysis: 5-layer networks (4 ELM hidden + readout)
+// at d=512, compared across activation function and algorithm.
+//
+// Architecture: 784 → 512 (frozen ReLU) → [512]×4 (trained) → 10 (readout)
+//
+// Activation comparison:
+//   ReLU  (non-invertible): target propagation clips negative targets to 0,
+//          introducing systematic error that compounds over 4 layers.
+//   tanh  (bijective ℝ→(-1,1)): propagated targets used as-is (no clipping);
+//          Z-update uses atanh blend — exact in pre-activation space.
+//   LeakyReLU (bijective ℝ→ℝ, alpha=0.1): case-split Z-update (exact).
+//
+// Algorithm comparison:
+//   target_prop: solve each layer to fit propagated targets (top-down only).
+//   proximal_als: Z_k blends bottom-up (A_k) and top-down (T_k) each iter.
+// ---------------------------------------------------------------------------
+// Single-layer baselines (L1) — reference for depth contribution.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_relu_512_L1 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_relu_512_L1",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/512, /*d=*/512, /*n_hidden=*/1, /*n_cycles=*/20,
+                /*lambda=*/1e-4f, /*use_tanh=*/false);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_admm_elm_tanh_512_L1 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "admm_elm_tanh_512_L1",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::AdmmElmExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/512, /*d=*/512, /*n_hidden=*/1,
+                /*n_admm=*/20, /*lambda=*/1e-4f,
+                /*rho=*/1.f, /*mu=*/1.f, /*leaky_alpha=*/0.1f,
+                /*use_tanh=*/true);
+        });
+    return true;
+}();
+// 5-layer deep networks (n_hidden=4 ELM layers + readout).
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_relu_512_L5 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_relu_512_L5",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/512, /*d=*/512, /*n_hidden=*/4, /*n_cycles=*/20,
+                /*lambda=*/1e-4f, /*use_tanh=*/false);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_tanh_512_L5 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_tanh_512_L5",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/512, /*d=*/512, /*n_hidden=*/4, /*n_cycles=*/20,
+                /*lambda=*/1e-4f, /*use_tanh=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_admm_elm_leaky_512_L5 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "admm_elm_leaky_512_L5",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::AdmmElmExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/512, /*d=*/512, /*n_hidden=*/4,
+                /*n_admm=*/20, /*lambda=*/1e-4f,
+                /*rho=*/1.f, /*mu=*/1.f, /*leaky_alpha=*/0.1f,
+                /*use_tanh=*/false);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_admm_elm_tanh_512_L5 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "admm_elm_tanh_512_L5",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::AdmmElmExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/512, /*d=*/512, /*n_hidden=*/4,
+                /*n_admm=*/20, /*lambda=*/1e-4f,
+                /*rho=*/1.f, /*mu=*/1.f, /*leaky_alpha=*/0.1f,
+                /*use_tanh=*/true);
+        });
+    return true;
+}();
+// ---------------------------------------------------------------------------
+// Width-1024 sweep: same 2×2 (algorithm × activation) matrix as 512, plus
+// single-layer references. Wider layers give more capacity — tests whether
+// depth benefit emerges once the bottleneck is relaxed.
+// ---------------------------------------------------------------------------
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_relu_1024_L1 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_relu_1024_L1",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/1024, /*d=*/1024, /*n_hidden=*/1, /*n_cycles=*/20,
+                /*lambda=*/1e-4f, /*use_tanh=*/false);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_admm_elm_tanh_1024_L1 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "admm_elm_tanh_1024_L1",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::AdmmElmExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/1024, /*d=*/1024, /*n_hidden=*/1,
+                /*n_admm=*/20, /*lambda=*/1e-4f,
+                /*rho=*/1.f, /*mu=*/1.f, /*leaky_alpha=*/0.1f,
+                /*use_tanh=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_relu_1024_L5 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_relu_1024_L5",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/1024, /*d=*/1024, /*n_hidden=*/4, /*n_cycles=*/20,
+                /*lambda=*/1e-4f, /*use_tanh=*/false);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_tanh_1024_L5 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_tanh_1024_L5",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/1024, /*d=*/1024, /*n_hidden=*/4, /*n_cycles=*/20,
+                /*lambda=*/1e-4f, /*use_tanh=*/true);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_admm_elm_leaky_1024_L5 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "admm_elm_leaky_1024_L5",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::AdmmElmExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/1024, /*d=*/1024, /*n_hidden=*/4,
+                /*n_admm=*/20, /*lambda=*/1e-4f,
+                /*rho=*/1.f, /*mu=*/1.f, /*leaky_alpha=*/0.1f,
+                /*use_tanh=*/false);
+        });
+    return true;
+}();
+[[maybe_unused]] static const bool _fayn_reg_admm_elm_tanh_1024_L5 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "admm_elm_tanh_1024_L5",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::AdmmElmExperiment>(
+                cfg, "data/mnist",
+                /*d0=*/1024, /*d=*/1024, /*n_hidden=*/4,
+                /*n_admm=*/20, /*lambda=*/1e-4f,
+                /*rho=*/1.f, /*mu=*/1.f, /*leaky_alpha=*/0.1f,
+                /*use_tanh=*/true);
+        });
+    return true;
+}();
 // ELM warm-start on epoch 0, then gradient steps on both hidden layers.
 [[maybe_unused]] static const bool _fayn_reg_deep_elm_init_hebb_4096_L3 = []() {
     fayn::ExperimentRegistry::instance().register_experiment(

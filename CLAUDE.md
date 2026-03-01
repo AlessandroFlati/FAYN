@@ -240,6 +240,26 @@ All weight updates are side effects of EventBus subscribers — never called dir
 
 ---
 
+## Empirical Rules from Experiments (CP-32, MNIST)
+
+Derived from CP-14 – CP-31. Mechanisms are general; magnitudes are MNIST-specific.
+Full explanations and decision table: `PROGRESS.md [CP-32]`.
+
+| # | Rule | Key numbers |
+|---|---|---|
+| R1 | **Width > depth for closed-form methods.** ELM scales strongly with d; depth adds +0.2–2.8% on top. | 256h→86%, 2048h→96%, 4096 L3→98% |
+| R2 | **Hebbian is width-insensitive; ELM gap grows.** Converges to normalised class centroid — off the ELM solution sphere. Not fixable by width/LR/activation. | 256h→81%, 2048h→82%; gap 5%→14% |
+| R3 | **ELM init is necessary for gradient fine-tuning.** Random init degrades; ELM warm-start improves. ELM sits near gradient-descent attractor. | −1% (random) vs +0.8% (ELM init) |
+| R4 | **Frozen projection has a hard accuracy ceiling.** Invest in W₀ width before learned-layer depth; ceiling is information content of H₀, not solver capacity. | d0=8192 saturates at ~97.7% |
+| R5 | **Depth only helps when single-layer is a bottleneck.** As d grows relative to input dim, a linear readout already near-memorises; depth adds nothing. | +2.8% at d=256, +0.2% at d=1024 |
+| R6 | **ReLU target propagation is robust.** Cycle-2 transient collapse self-corrects. Approximate inversion is as good as exact at the fixed point. | L5 cycle-2 dip to 65–77%, then full recovery |
+| R7 | **tanh gives smoother but not better convergence.** No oscillation; same or slightly lower final accuracy than ReLU at every width. | — |
+| R8 | **Target propagation depth limited by amplitude cascade.** Each layer multiplies target magnitudes by κ(W). ELM+ReLU stable ≥4 layers; ADMM+tanh fails at depth-4 d=1024; LeakyReLU ADMM diverges at any depth >1. | κ(W)^4 explosion |
+| R9 | **BF16 needs explicit precision management.** Updates ≈1e-5 are silently dropped in BF16 at W~0.1. Use FP32 weights; row-norm as side effect keeps W in representable range. | BF16 step ≈ 5×10⁻⁴ >> update |
+| R10 | **Proximal ALS viable for 1–2 layers only.** Competitive with ELM at same depth. Fails at depth-4: tanh (amplitude cascade), LeakyReLU (unbounded Z), full ADMM with duals (oscillates). | — |
+
+---
+
 ## Pending Work (see also PROGRESS.md)
 
 Reward/loss pipeline:

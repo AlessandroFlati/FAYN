@@ -43,7 +43,8 @@ public:
                       int   d        = 256,    // width of all ELM hidden layers
                       int   n_hidden = 1,      // # hidden ELM layers (excl. readout)
                       int   n_cycles = 5,
-                      float lambda   = 1e-4f);
+                      float lambda   = 1e-4f,
+                      bool  use_tanh = false); // tanh hidden activation (invertible)
 
     void  setup()           override;
     float run_epoch(size_t) override;
@@ -55,6 +56,7 @@ private:
     int         n_hidden_;
     int         n_cycles_;
     float       lambda_;
+    bool        use_tanh_;
 
     std::shared_ptr<DenseLayer>              w0_;       // frozen projection [784 → d0]
     std::vector<std::shared_ptr<DenseLayer>> hidden_;   // n_hidden layers: [d0→d], [d→d]...
@@ -171,7 +173,8 @@ public:
                       float lambda      = 1e-4f,
                       float rho         = 1.f,
                       float mu          = 1.f,
-                      float leaky_alpha = 0.1f);
+                      float leaky_alpha = 0.1f,
+                      bool  use_tanh    = false); // tanh: exact inverse, linear Z-blend
 
     void  setup()           override;
     float run_epoch(size_t) override;
@@ -180,6 +183,7 @@ private:
     std::string data_path_;
     int   d0_, d_, n_hidden_, n_admm_;
     float lambda_, rho_, mu_, leaky_alpha_;
+    bool  use_tanh_;
 
     std::shared_ptr<DenseLayer>              w0_;
     std::vector<std::shared_ptr<DenseLayer>> hidden_;

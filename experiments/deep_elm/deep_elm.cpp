@@ -23,7 +23,8 @@ DeepELMExperiment::DeepELMExperiment(
     int   d,
     int   n_hidden,
     int   n_cycles,
-    float lambda)
+    float lambda,
+    bool  use_tanh)
     : Experiment(cfg)
     , data_path_(std::move(data_path))
     , d0_(d0)
@@ -31,6 +32,7 @@ DeepELMExperiment::DeepELMExperiment(
     , n_hidden_(n_hidden)
     , n_cycles_(n_cycles)
     , lambda_(lambda)
+    , use_tanh_(use_tanh)
 {}
 
 void DeepELMExperiment::setup() {
@@ -131,7 +133,10 @@ std::vector<Tensor> DeepELMExperiment::compute_hidden_activations() const {
     H.reserve(static_cast<size_t>(n_hidden_));
     for (int k = 0; k < n_hidden_; ++k) {
         const Tensor& prev = (k == 0) ? H0_dev_ : H[static_cast<size_t>(k - 1)];
-        H.push_back(solver_.relu_forward(prev, hidden_[static_cast<size_t>(k)]->weights_fp32()));
+        if (use_tanh_)
+            H.push_back(solver_.tanh_forward(prev, hidden_[static_cast<size_t>(k)]->weights_fp32()));
+        else
+            H.push_back(solver_.relu_forward(prev, hidden_[static_cast<size_t>(k)]->weights_fp32()));
     }
     return H;
 }
@@ -157,12 +162,16 @@ float DeepELMExperiment::evaluate(DataSource& ds) {
     for (size_t b = 0; b < n_batches; ++b) {
         Batch batch = ds.next_batch(cfg_.batch_size);
 
+        // W0 is always ReLU — frozen projection, same activation as precomputed H0.
         Tensor h = w0_->forward(batch.inputs);
         apply_relu(h, /*stream=*/nullptr);
 
         for (auto& layer : hidden_) {
             h = layer->forward(h);
-            apply_relu(h, /*stream=*/nullptr);
+            if (use_tanh_)
+                apply_tanh(h, /*stream=*/nullptr);
+            else
+                apply_relu(h, /*stream=*/nullptr);
         }
 
         Tensor logits = readout_->forward(h);
@@ -204,7 +213,11 @@ float DeepELMExperiment::run_epoch(size_t epoch) {
             for (int k = n_hidden_ - 1; k >= 0; --k) {
                 T_owned = std::make_unique<Tensor>(
                     solver_.propagate_target(*W_curr, *T_curr));
-                apply_relu(*T_owned, /*stream=*/nullptr);
+                // ReLU: clip propagated targets to valid range [0, inf).
+                // tanh: no clipping — tanh can target any value in (-1,1) and
+                //       the solve uses raw propagated targets as regression targets.
+                if (!use_tanh_)
+                    apply_relu(*T_owned, /*stream=*/nullptr);
                 T_curr = T_owned.get();
 
                 const Tensor& H_pre =
@@ -458,11 +471,13 @@ AdmmElmExperiment::AdmmElmExperiment(
     float lambda,
     float rho,
     float mu,
-    float leaky_alpha)
+    float leaky_alpha,
+    bool  use_tanh)
     : Experiment(cfg)
     , data_path_(std::move(data_path))
     , d0_(d0), d_(d), n_hidden_(n_hidden), n_admm_(n_admm)
     , lambda_(lambda), rho_(rho), mu_(mu), leaky_alpha_(leaky_alpha)
+    , use_tanh_(use_tanh)
 {}
 
 void AdmmElmExperiment::setup() {
@@ -519,7 +534,10 @@ void AdmmElmExperiment::setup() {
             H_init.push_back(Tensor::make({N_fit_, d_sz}, DType::Float32, Device::CUDA));
             FAYN_CUDA_CHECK(cudaMemcpy(H_init.back().data, Z_[ki].data,
                 N_fit_ * d_sz * sizeof(float), cudaMemcpyDeviceToDevice));
-            apply_leaky_relu(H_init.back(), leaky_alpha_);
+            if (use_tanh_)
+                apply_tanh(H_init.back(), /*stream=*/nullptr);
+            else
+                apply_leaky_relu(H_init.back(), leaky_alpha_);
             H_prev = &H_init.back();
         }
     }
@@ -579,7 +597,10 @@ std::vector<Tensor> AdmmElmExperiment::get_hidden_activations() const {
         Tensor h = Tensor::make({N_fit_, d_sz}, DType::Float32, Device::CUDA);
         FAYN_CUDA_CHECK(cudaMemcpy(h.data, Z_[static_cast<size_t>(k)].data,
             N_fit_ * d_sz * sizeof(float), cudaMemcpyDeviceToDevice));
-        apply_leaky_relu(h, leaky_alpha_);
+        if (use_tanh_)
+            apply_tanh(h, /*stream=*/nullptr);
+        else
+            apply_leaky_relu(h, leaky_alpha_);
         H.push_back(std::move(h));
     }
     return H;
@@ -601,10 +622,13 @@ float AdmmElmExperiment::evaluate(DataSource& ds) {
         // w0_ is the frozen ReLU projection — matches how H0_dev_ is built.
         Tensor h = w0_->forward(batch.inputs);
         apply_relu(h, /*stream=*/nullptr);
-        // Trained hidden layers use LeakyReLU.
+        // Trained hidden layers: LeakyReLU or tanh depending on use_tanh_.
         for (auto& layer : hidden_) {
             h = layer->forward(h);
-            apply_leaky_relu(h, leaky_alpha_);
+            if (use_tanh_)
+                apply_tanh(h, /*stream=*/nullptr);
+            else
+                apply_leaky_relu(h, leaky_alpha_);
         }
         Tensor logits = readout_->forward(h);
         total_acc += fayn::accuracy(logits, batch.targets);
@@ -630,14 +654,17 @@ float AdmmElmExperiment::run_epoch(size_t epoch) {
         const size_t d_sz = static_cast<size_t>(d_);
 
         for (int iter = 0; iter < n_admm_; ++iter) {
-            // ---- Step 1: H_k = LeakyReLU(Z_k) ----
+            // ---- Step 1: H_k = sigma(Z_k)  [LeakyReLU or tanh] ----
             std::vector<Tensor> H(static_cast<size_t>(n_hidden_));
             for (int k = 0; k < n_hidden_; ++k) {
                 const size_t ki = static_cast<size_t>(k);
                 H[ki] = Tensor::make({N_fit_, d_sz}, DType::Float32, Device::CUDA);
                 FAYN_CUDA_CHECK(cudaMemcpy(H[ki].data, Z_[ki].data,
                     N_fit_ * d_sz * sizeof(float), cudaMemcpyDeviceToDevice));
-                apply_leaky_relu(H[ki], leaky_alpha_);
+                if (use_tanh_)
+                    apply_tanh(H[ki], /*stream=*/nullptr);
+                else
+                    apply_leaky_relu(H[ki], leaky_alpha_);
             }
 
             // ---- Step 2: W-update — ELM solve, target = current Z_k (no dual) ----
@@ -670,25 +697,38 @@ float AdmmElmExperiment::run_epoch(size_t epoch) {
 
             // ---- Step 5: Top-down target propagation ----
             // T_k is the post-activation target for hidden layer k.
+            // Readout W [10, d] is non-square → CPU Gram path.
+            // Hidden W [d, d]: Gram + Cholesky with lambda_prop scaled to W norm.
+            // Both direct-LU and Gram+Cholesky diverge at d=1024 depth-4 due to
+            // target amplitude cascade (ADMM analog of exploding gradients):
+            // each propagation step amplifies targets → tanh saturation → near-rank-1 H
+            // → large-norm W → further amplification. This is a known limitation of
+            // deep ADMM/target-propagation for tanh activations beyond d=512.
+            const float lambda_prop = 1e-4f;
             std::vector<Tensor> T_targets(static_cast<size_t>(n_hidden_));
             {
                 Tensor T_curr = solver_.propagate_target(
-                    readout_->weights_fp32(), T_dev_, lambda_);
+                    readout_->weights_fp32(), T_dev_, lambda_prop);
                 for (int k = n_hidden_ - 1; k >= 0; --k) {
                     const size_t ki = static_cast<size_t>(k);
                     T_targets[ki] = std::move(T_curr);
                     if (k > 0)
                         T_curr = solver_.propagate_target(
-                            hidden_[ki]->weights_fp32(), T_targets[ki], lambda_);
+                            hidden_[ki]->weights_fp32(), T_targets[ki], lambda_prop);
                 }
             }
 
-            // ---- Step 6: Z-update — element-wise case-split minimizer ----
-            // u_zero_ is a pre-allocated zero tensor (proximal ALS: no dual accumulation).
+            // ---- Step 6: Z-update ----
+            // LeakyReLU: element-wise case-split minimizer (exact for piecewise linear sigma).
+            // tanh: linear blend in pre-activation space via atanh (exact for linear sigma approx).
+            // u_zero_ passed for LeakyReLU path (proximal ALS: no dual accumulation).
             for (int k = 0; k < n_hidden_; ++k) {
                 const size_t ki = static_cast<size_t>(k);
-                admm_z_update(Z_[ki], A[ki], u_zero_, T_targets[ki],
-                              rho_, mu_, leaky_alpha_);
+                if (use_tanh_)
+                    admm_z_update_tanh(Z_[ki], A[ki], T_targets[ki], rho_, mu_);
+                else
+                    admm_z_update(Z_[ki], A[ki], u_zero_, T_targets[ki],
+                                  rho_, mu_, leaky_alpha_);
             }
             FAYN_CUDA_CHECK(cudaDeviceSynchronize());
 

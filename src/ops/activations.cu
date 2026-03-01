@@ -204,6 +204,54 @@ void admm_z_update(Tensor& Z, const Tensor& A, const Tensor& u,
     FAYN_CUDA_CHECK(cudaGetLastError());
 }
 
+// ---------------------------------------------------------------------------
+// admm_z_update_tanh_kernel: element-wise proximal ALS Z-update for tanh.
+//
+// min_z  (rho/2)(z - A[i])^2  +  (mu/2)(z - atanh(T_target[i]))^2
+//
+// Approximates the true tanh subproblem by working in pre-activation space:
+// the residual (tanh(z) - T)^2 is replaced by (z - atanh(T))^2.
+// Exact solution: z = (rho * A + mu * atanh(clamp(T, -1+eps, 1-eps))) / (rho + mu)
+//
+// atanh(0.9999) ≈ 4.6 — limits pre-activation target magnitude so tanh
+// does not saturate excessively on the first few iterations.
+// ---------------------------------------------------------------------------
+__global__ void admm_z_update_tanh_kernel(
+    float* __restrict__       Z,
+    const float* __restrict__ A,
+    const float* __restrict__ T_target,
+    float rho, float mu, float inv_rho_mu,
+    size_t n)
+{
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    // eps=0.1: atanh(0.9) ≈ 1.47, keeping pre-activation Z bounded and
+    // preventing tanh saturation that makes H_k near-constant (degenerate solve).
+    constexpr float eps = 0.1f;
+    float t = fminf(fmaxf(T_target[i], -1.f + eps), 1.f - eps);
+    Z[i] = (rho * A[i] + mu * atanhf(t)) * inv_rho_mu;
+}
+
+void admm_z_update_tanh(Tensor& Z, const Tensor& A, const Tensor& T_target,
+                         float rho, float mu, cudaStream_t stream)
+{
+    if (Z.dtype != DType::Float32 || A.dtype != DType::Float32 ||
+        T_target.dtype != DType::Float32)
+        throw std::runtime_error("admm_z_update_tanh: all tensors must be Float32");
+    if (Z.device != Device::CUDA)
+        throw std::runtime_error("admm_z_update_tanh: tensors must be on CUDA");
+    const size_t n = Z.numel();
+    constexpr int BLOCK = 256;
+    int grid = static_cast<int>((n + BLOCK - 1) / BLOCK);
+    float inv_total = 1.f / (rho + mu);
+    admm_z_update_tanh_kernel<<<grid, BLOCK, 0, stream>>>(
+        static_cast<float*>(Z.data),
+        static_cast<const float*>(A.data),
+        static_cast<const float*>(T_target.data),
+        rho, mu, inv_total, n);
+    FAYN_CUDA_CHECK(cudaGetLastError());
+}
+
 void admm_dual_update(Tensor& u, const Tensor& A, const Tensor& Z,
                       cudaStream_t stream)
 {

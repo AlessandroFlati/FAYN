@@ -66,6 +66,15 @@ void admm_z_update(Tensor& Z, const Tensor& A, const Tensor& u,
 void admm_dual_update(Tensor& u, const Tensor& A, const Tensor& Z,
                       cudaStream_t stream = nullptr);
 
+// Fused Z-update for tanh activation (proximal ALS, no dual variable):
+//   Z[i] = (rho * A[i] + mu * atanh(clamp(T_target[i], -1+eps, 1-eps))) / (rho + mu)
+// This is the exact minimiser of (rho/2)(z-A)^2 + (mu/2)(z - atanh(T))^2,
+// which approximates the true tanh subproblem when tanh'(z) is treated as 1.
+// Clamping prevents atanh divergence when |T_target| >= 1.
+// All tensors must be Float32 on CUDA with identical shape.
+void admm_z_update_tanh(Tensor& Z, const Tensor& A, const Tensor& T_target,
+                         float rho, float mu, cudaStream_t stream = nullptr);
+
 // ---------------------------------------------------------------------------
 // Custom activation plugin.
 // Users register a named kernel via ActivationRegistry.
