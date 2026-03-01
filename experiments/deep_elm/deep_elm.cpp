@@ -17,10 +17,16 @@ namespace fayn {
 // ---------------------------------------------------------------------------
 // shift_mnist_bf16: shift each 28×28 image in a batch of N flat BF16 vectors.
 //
-// dir 0 (left):  output[row][col] = input[row][col+1]  (content shifts left)
-// dir 1 (right): output[row][col] = input[row][col-1]  (content shifts right)
-// dir 2 (up):    output[row][col] = input[row+1][col]  (content shifts up)
-// dir 3 (down):  output[row][col] = input[row-1][col]  (content shifts down)
+// Axis-aligned (1-pixel):
+//   dir 0 (left):       output[row][col] = input[row][col+1]
+//   dir 1 (right):      output[row][col] = input[row][col-1]
+//   dir 2 (up):         output[row][col] = input[row+1][col]
+//   dir 3 (down):       output[row][col] = input[row-1][col]
+// Diagonal (1-pixel):
+//   dir 4 (up-left):    output[row][col] = input[row+1][col+1]
+//   dir 5 (up-right):   output[row][col] = input[row+1][col-1]
+//   dir 6 (down-left):  output[row][col] = input[row-1][col+1]
+//   dir 7 (down-right): output[row][col] = input[row-1][col-1]
 //
 // Out-of-bounds pixels are filled with 0 (zero-padding).
 // ---------------------------------------------------------------------------
@@ -38,10 +44,14 @@ static void shift_mnist_bf16(
             for (int col = 0; col < 28; ++col) {
                 int sr = row, sc = col;
                 switch (direction) {
-                    case 0: sc = col + 1; break;  // left
-                    case 1: sc = col - 1; break;  // right
-                    case 2: sr = row + 1; break;  // up
-                    case 3: sr = row - 1; break;  // down
+                    case 0: sc = col + 1;                  break;  // left
+                    case 1: sc = col - 1;                  break;  // right
+                    case 2: sr = row + 1;                  break;  // up
+                    case 3: sr = row - 1;                  break;  // down
+                    case 4: sr = row + 1; sc = col + 1;   break;  // up-left
+                    case 5: sr = row + 1; sc = col - 1;   break;  // up-right
+                    case 6: sr = row - 1; sc = col + 1;   break;  // down-left
+                    case 7: sr = row - 1; sc = col - 1;   break;  // down-right
                 }
                 d[row * 28 + col] = (sr >= 0 && sr < 28 && sc >= 0 && sc < 28)
                     ? s[sr * 28 + sc] : kZero;
@@ -1144,7 +1154,7 @@ DeepELMEnsembleExperiment::DeepELMEnsembleExperiment(
     bool             use_conv,
     int              conv_c_out,
     std::vector<int> conv_k_per_member,
-    bool             use_aug)
+    int              n_aug_views)
     : Experiment(cfg)
     , data_path_(std::move(data_path))
     , n_members_(n_members)
@@ -1156,15 +1166,18 @@ DeepELMEnsembleExperiment::DeepELMEnsembleExperiment(
     , use_conv_(use_conv)
     , conv_c_out_(conv_c_out)
     , conv_k_per_member_(std::move(conv_k_per_member))
-    , use_aug_(use_aug)
+    , n_aug_views_(n_aug_views)
 {
     if (!conv_k_per_member_.empty() &&
         static_cast<int>(conv_k_per_member_.size()) != n_members_)
         throw std::invalid_argument(
             "DeepELMEnsembleExperiment: conv_k_per_member size must equal n_members");
-    if (use_aug_ && !use_conv_)
+    if (n_aug_views_ > 0 && !use_conv_)
         throw std::invalid_argument(
-            "DeepELMEnsembleExperiment: use_aug requires use_conv=true");
+            "DeepELMEnsembleExperiment: n_aug_views>0 requires use_conv=true");
+    if (n_aug_views_ != 0 && n_aug_views_ != 5 && n_aug_views_ != 9)
+        throw std::invalid_argument(
+            "DeepELMEnsembleExperiment: n_aug_views must be 0, 5, or 9");
 }
 
 void DeepELMEnsembleExperiment::setup() {
@@ -1202,10 +1215,11 @@ void DeepELMEnsembleExperiment::setup() {
                                N_fit_ * 10 * sizeof(float),
                                cudaMemcpyHostToDevice));
 
-    // Build T_aug_dev_ = T_dev_ repeated 5× (for feature-level augmentation).
-    if (use_aug_) {
-        T_aug_dev_ = Tensor::make({5 * N_fit_, 10}, DType::Float32, Device::CUDA);
-        for (int v = 0; v < 5; ++v) {
+    // Build T_aug_dev_ = T_dev_ repeated n_aug_views_ times (feature-level aug).
+    if (n_aug_views_ > 0) {
+        T_aug_dev_ = Tensor::make({static_cast<size_t>(n_aug_views_) * N_fit_, 10},
+                                  DType::Float32, Device::CUDA);
+        for (int v = 0; v < n_aug_views_; ++v) {
             FAYN_CUDA_CHECK(cudaMemcpy(
                 static_cast<float*>(T_aug_dev_.data) + static_cast<size_t>(v) * N_fit_ * 10,
                 T_dev_.data, N_fit_ * 10 * sizeof(float),
@@ -1263,10 +1277,13 @@ Tensor DeepELMEnsembleExperiment::compute_member_h0(const Member& m) {
     const size_t n_batches = data_->size() / fit_bs;
     const size_t d0        = static_cast<size_t>(m.d0);
 
-    if (use_aug_) {
-        // Augmented conv path: 5 views — original + 4 pixel shifts.
-        // H0_dev [5*N_fit, d0]: slots 0..N_fit-1 = original, N_fit..5*N_fit-1 = shifts.
-        Tensor H0_dev = Tensor::make({5 * N_fit_, d0}, DType::Float32, Device::CUDA);
+    if (n_aug_views_ > 0) {
+        // Augmented conv path: n_aug_views_ views — original + (n_aug_views_-1) shifts.
+        // H0_dev [n_aug_views*N_fit, d0]: slot 0=original, slots 1..n_aug_views-1=shifts.
+        const int n_dirs = n_aug_views_ - 1;  // number of shifted views (4 or 8)
+        Tensor H0_dev = Tensor::make(
+            {static_cast<size_t>(n_aug_views_) * N_fit_, d0},
+            DType::Float32, Device::CUDA);
         std::vector<__nv_bfloat16> bf16_buf(fit_bs * 784);
         std::vector<__nv_bfloat16> shifted_buf(fit_bs * 784);
         Tensor x_shifted = Tensor::make({fit_bs, 784}, DType::BFloat16, Device::CUDA);
@@ -1284,12 +1301,12 @@ Tensor DeepELMEnsembleExperiment::compute_member_h0(const Member& m) {
                     cudaMemcpyDeviceToDevice));
             }
 
-            // 4 shifted views.
+            // Shifted views.
             FAYN_CUDA_CHECK(cudaStreamSynchronize(nullptr));
             FAYN_CUDA_CHECK(cudaMemcpy(bf16_buf.data(), batch.inputs.data,
                                        fit_bs * 784 * sizeof(__nv_bfloat16),
                                        cudaMemcpyDeviceToHost));
-            for (int dir = 0; dir < 4; ++dir) {
+            for (int dir = 0; dir < n_dirs; ++dir) {
                 shift_mnist_bf16(bf16_buf.data(), shifted_buf.data(), fit_bs, dir);
                 FAYN_CUDA_CHECK(cudaMemcpy(x_shifted.data, shifted_buf.data(),
                                            fit_bs * 784 * sizeof(__nv_bfloat16),
@@ -1539,10 +1556,11 @@ float DeepELMEnsembleExperiment::evaluate(DataSource& ds) {
 // ---------------------------------------------------------------------------
 float DeepELMEnsembleExperiment::run_epoch(size_t epoch) {
     if (epoch == 0) {
-        const Tensor& T_train = use_aug_ ? T_aug_dev_ : T_dev_;
+        const Tensor& T_train = n_aug_views_ > 0 ? T_aug_dev_ : T_dev_;
         for (int m_idx = 0; m_idx < n_members_; ++m_idx) {
             const int member_d0 = members_[static_cast<size_t>(m_idx)].d0;
-            const size_t h0_rows = use_aug_ ? 5 * N_fit_ : N_fit_;
+            const size_t h0_rows = n_aug_views_ > 0
+                                   ? static_cast<size_t>(n_aug_views_) * N_fit_ : N_fit_;
             fmt::print("  [member {:2d}] computing H0 [{}, {}]...\n",
                        m_idx, h0_rows, member_d0);
             Tensor H0 = compute_member_h0(members_[static_cast<size_t>(m_idx)]);

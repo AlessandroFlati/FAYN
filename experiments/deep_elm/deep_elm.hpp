@@ -247,8 +247,9 @@ public:
     // conv_k_per_member: per-member kernel size for use_conv=true.
     //   Empty → all members use k=5.
     //   Non-empty → size must equal n_members; each entry is 3, 5, or 7.
-    // use_aug: compute H0 on original + 4 pixel-shifted views (5× rows).
-    //   The ELM solve sees augmented features; target propagation is unchanged.
+    // n_aug_views: number of augmented views per sample for ELM solve (0 = no aug).
+    //   5 → original + 4 axis-aligned 1-pixel shifts.
+    //   9 → original + 4 axis-aligned + 4 diagonal 1-pixel shifts.
     //   Only supported with use_conv=true (forward pass must be FP32).
     DeepELMEnsembleExperiment(const ExperimentConfig& cfg,
                               std::string data_path,
@@ -261,7 +262,7 @@ public:
                               bool               use_conv         = false,
                               int                conv_c_out       = 64,
                               std::vector<int>   conv_k_per_member = {},
-                              bool               use_aug          = false);
+                              int                n_aug_views      = 0);
 
     void  setup()           override;
     float run_epoch(size_t) override;
@@ -281,13 +282,13 @@ private:
     bool             use_conv_;
     int              conv_c_out_;
     std::vector<int> conv_k_per_member_;
-    bool             use_aug_;
+    int              n_aug_views_;  // 0=none, 5=4-dir, 9=8-dir
 
     std::vector<Member> members_;
     ElmSolver           solver_;
 
     Tensor  T_dev_;     // FP32 [N_fit, 10] — one-hot labels (shared across members)
-    Tensor  T_aug_dev_; // FP32 [5*N_fit, 10] — augmented labels (use_aug only)
+    Tensor  T_aug_dev_; // FP32 [n_aug_views*N_fit, 10] — augmented labels (n_aug_views>0)
     size_t  N_fit_ = 0;
 
     Tensor              compute_member_h0(const Member& m);

@@ -1068,9 +1068,8 @@ namespace {
     return true;
 }();
 
-// Feature-level augmentation: compute H0 on 5 views (original + 4 shifts), solve ELM
-// on the augmented [5*N_fit, d0] feature matrix. Target propagation unchanged (stable).
-// 5-member conv64 L2 with augmentation.
+// Feature-level augmentation (5 views = original + 4 axis-aligned shifts).
+// 5-member conv64 L2 with 5-view augmentation.
 [[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_aug_ensemble_5xL2 = []() {
     fayn::ExperimentRegistry::instance().register_experiment(
         "deep_elm_conv64_aug_ensemble_5xL2",
@@ -1081,11 +1080,11 @@ namespace {
                 /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
                 /*use_conv=*/true, /*conv_c_out=*/64,
                 /*conv_k_per_member=*/std::vector<int>{},
-                /*use_aug=*/true);
+                /*n_aug_views=*/5);
         });
     return true;
 }();
-// 10-member conv64 L2 with feature-level augmentation.
+// 10-member conv64 L2 with 5-view feature-level augmentation.
 [[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_aug_ensemble_10xL2 = []() {
     fayn::ExperimentRegistry::instance().register_experiment(
         "deep_elm_conv64_aug_ensemble_10xL2",
@@ -1096,7 +1095,69 @@ namespace {
                 /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
                 /*use_conv=*/true, /*conv_c_out=*/64,
                 /*conv_k_per_member=*/std::vector<int>{},
-                /*use_aug=*/true);
+                /*n_aug_views=*/5);
+        });
+    return true;
+}();
+// 9-view augmentation: original + 4 axis-aligned + 4 diagonal 1-pixel shifts.
+// 5-member conv64 L2 with 9-view augmentation.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_9view_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_9view_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/5, /*d0=*/9216, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/9);
+        });
+    return true;
+}();
+// 10-member conv64 L2 with 9-view augmentation.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv64_9view_ensemble_10xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv64_9view_ensemble_10xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/10, /*d0=*/9216, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/9);
+        });
+    return true;
+}();
+// C_out=128 with 5-view augmentation: regularize the wider front-end via 5× samples.
+// 5-member conv128 L2 with augmentation.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv128_aug_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv128_aug_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/5, /*d0=*/18432, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/128,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/5);
+        });
+    return true;
+}();
+// 10-member conv128 L2 with 5-view augmentation.
+[[maybe_unused]] static const bool _fayn_reg_deep_elm_conv128_aug_ensemble_10xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "deep_elm_conv128_aug_ensemble_10xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/mnist",
+                /*n_members=*/10, /*d0=*/18432, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/128,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/5);
         });
     return true;
 }();

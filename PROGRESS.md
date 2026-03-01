@@ -5,6 +5,59 @@ not which files changed. Newest entries at the top.
 
 ---
 
+## [CP-39] 9-view augmentation + C_out=128 — 98.85% MNIST test
+**Date:** 2026-03-01 20:14 UTC
+
+### Motivation
+Two improvements tested in parallel after CP-38 (98.58%):
+1. **9-view augmentation**: add 4 diagonal 1-pixel shifts (dirs 4–7) to the existing
+   4 axis-aligned shifts, giving 9 views total (9× effective N for Gram solve).
+2. **C_out=128 + augmentation**: single-model conv128 overfit without aug (97.71%).
+   With 5× aug the effective N=299k might regularize the larger feature space.
+
+### Infrastructure changes
+- `shift_mnist_bf16` extended with 4 diagonal cases (up-left, up-right, down-left,
+  down-right = dirs 4–7); comment updated.
+- `bool use_aug` replaced by `int n_aug_views` (0=none, 5=4-dir, 9=8-dir) throughout
+  `DeepELMEnsembleExperiment` — constructor, header, cpp, runner. Constructor now validates
+  values are 0, 5, or 9.
+- New experiments: `deep_elm_conv64_9view_ensemble_{5,10}xL2`,
+  `deep_elm_conv128_aug_ensemble_{5,10}xL2`.
+
+### Results
+
+| Experiment | Members | Views | C_out | Test acc |
+|---|---|---|---|---|
+| deep_elm_conv64_aug_ensemble_10xL2 (CP-38 best) | 10 | 5 | 64 | 98.58% |
+| deep_elm_conv64_9view_ensemble_5xL2 | 5 | 9 | 64 | 98.60% |
+| deep_elm_conv64_9view_ensemble_10xL2 | 10 | 9 | 64 | 98.58% |
+| **deep_elm_conv128_aug_ensemble_5xL2** | **5** | **5** | **128** | **98.84% ← new best** |
+| **deep_elm_conv128_aug_ensemble_10xL2** | **10** | **5** | **128** | **98.85% ← new best** |
+
+Individual conv128 member test accuracies (5-member run):
+98.68%, 98.74%, 98.59%, 98.67%, 98.65% — all significantly above conv64 (~98.35-98.48%).
+
+### Analysis
+- **9-view (diagonal shifts): negligible** (+0.02% for 5 members, 0% for 10). The
+  axis-aligned shifts already span the main translation directions; diagonal shifts add
+  minimal new information for MNIST digit recognition. GPU memory for 9-view conv64 is
+  tight (H0=[539k,9216] ≈ 20GB + H1≈9GB ≈ 29GB; fits in 32GB RTX 5090 VRAM).
+- **C_out=128 + augmentation: +0.26%**. The 5× augmented Gram solve (N=299k) provides
+  enough regularization to use 18432 conv features without overfitting. Without aug,
+  conv128 was stuck at 97.71% (overfitting). With aug, per-member accuracy jumps from
+  ~98.35% (conv64) to ~98.65% (conv128) — the extra filters capture additional spatial
+  patterns. Note: conv128 + 9-view would require H0=[539k,18432] ≈ 36GB — exceeds 32GB.
+- **5 vs 10 members (conv128)**: +0.01% — diminishing returns from ensemble scaling.
+  The bottleneck has shifted from ensemble variance to per-member feature quality.
+
+### Conclusion
+**New SOTA: 98.85% on MNIST test set** (no backprop, no standard CNN training).
+Conv128 (C_out=128, d0=18432) + 5-view feature augmentation + 10-member ensemble,
+each member solved once via ELM. The augmentation-as-regularizer pattern now
+consistently unlocks larger C_out that would otherwise overfit.
+
+---
+
 ## [CP-38] Feature-level augmentation (5× views) — 98.58% MNIST test
 **Date:** 2026-03-01 14:44 UTC
 
