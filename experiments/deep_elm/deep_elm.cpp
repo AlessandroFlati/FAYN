@@ -15,46 +15,53 @@
 namespace fayn {
 
 // ---------------------------------------------------------------------------
-// shift_mnist_bf16: shift each 28×28 image in a batch of N flat BF16 vectors.
+// shift_image_bf16: 1-pixel spatial shift for multi-channel images in CHW layout.
+//
+// Input/output: [N, c_in*img_h*img_w] BF16 (CHW per image — all channels shifted).
 //
 // Axis-aligned (1-pixel):
-//   dir 0 (left):       output[row][col] = input[row][col+1]
-//   dir 1 (right):      output[row][col] = input[row][col-1]
-//   dir 2 (up):         output[row][col] = input[row+1][col]
-//   dir 3 (down):       output[row][col] = input[row-1][col]
+//   dir 0 (left):       output[c][row][col] = input[c][row][col+1]
+//   dir 1 (right):      output[c][row][col] = input[c][row][col-1]
+//   dir 2 (up):         output[c][row][col] = input[c][row+1][col]
+//   dir 3 (down):       output[c][row][col] = input[c][row-1][col]
 // Diagonal (1-pixel):
-//   dir 4 (up-left):    output[row][col] = input[row+1][col+1]
-//   dir 5 (up-right):   output[row][col] = input[row+1][col-1]
-//   dir 6 (down-left):  output[row][col] = input[row-1][col+1]
-//   dir 7 (down-right): output[row][col] = input[row-1][col-1]
+//   dir 4 (up-left):    output[c][row][col] = input[c][row+1][col+1]
+//   dir 5 (up-right):   output[c][row][col] = input[c][row+1][col-1]
+//   dir 6 (down-left):  output[c][row][col] = input[c][row-1][col+1]
+//   dir 7 (down-right): output[c][row][col] = input[c][row-1][col-1]
 //
 // Out-of-bounds pixels are filled with 0 (zero-padding).
 // ---------------------------------------------------------------------------
-static void shift_mnist_bf16(
-    const __nv_bfloat16* src,   // [N, 784]
-    __nv_bfloat16*       dst,   // [N, 784]
+static void shift_image_bf16(
+    const __nv_bfloat16* src,  // [N, c_in*img_h*img_w]
+    __nv_bfloat16*       dst,  // [N, c_in*img_h*img_w]
     size_t N,
+    int c_in, int img_h, int img_w,
     int direction)
 {
     static const __nv_bfloat16 kZero = __float2bfloat16(0.f);
+    const int hw = img_h * img_w;
     for (size_t i = 0; i < N; ++i) {
-        const __nv_bfloat16* s = src + i * 784;
-        __nv_bfloat16*       d = dst + i * 784;
-        for (int row = 0; row < 28; ++row) {
-            for (int col = 0; col < 28; ++col) {
-                int sr = row, sc = col;
-                switch (direction) {
-                    case 0: sc = col + 1;                  break;  // left
-                    case 1: sc = col - 1;                  break;  // right
-                    case 2: sr = row + 1;                  break;  // up
-                    case 3: sr = row - 1;                  break;  // down
-                    case 4: sr = row + 1; sc = col + 1;   break;  // up-left
-                    case 5: sr = row + 1; sc = col - 1;   break;  // up-right
-                    case 6: sr = row - 1; sc = col + 1;   break;  // down-left
-                    case 7: sr = row - 1; sc = col - 1;   break;  // down-right
+        for (int c = 0; c < c_in; ++c) {
+            const __nv_bfloat16* s = src + i * c_in * hw + c * hw;
+            __nv_bfloat16*       d = dst + i * c_in * hw + c * hw;
+            for (int row = 0; row < img_h; ++row) {
+                for (int col = 0; col < img_w; ++col) {
+                    int sr = row, sc = col;
+                    switch (direction) {
+                        case 0: sc = col + 1;                    break;  // left
+                        case 1: sc = col - 1;                    break;  // right
+                        case 2: sr = row + 1;                    break;  // up
+                        case 3: sr = row - 1;                    break;  // down
+                        case 4: sr = row + 1; sc = col + 1;     break;  // up-left
+                        case 5: sr = row + 1; sc = col - 1;     break;  // up-right
+                        case 6: sr = row - 1; sc = col + 1;     break;  // down-left
+                        case 7: sr = row - 1; sc = col - 1;     break;  // down-right
+                    }
+                    d[row * img_w + col] =
+                        (sr >= 0 && sr < img_h && sc >= 0 && sc < img_w)
+                        ? s[sr * img_w + sc] : kZero;
                 }
-                d[row * 28 + col] = (sr >= 0 && sr < 28 && sc >= 0 && sc < 28)
-                    ? s[sr * 28 + sc] : kZero;
             }
         }
     }
@@ -245,7 +252,8 @@ void DeepELMExperiment::precompute_h0_t() {
                 // Copy inputs to host, shift, re-upload.
                 FAYN_CUDA_CHECK(cudaMemcpy(input_host.data(), batch.inputs.data,
                     fit_bs * 784 * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost));
-                shift_mnist_bf16(input_host.data(), shifted_host.data(), fit_bs, dir);
+                shift_image_bf16(input_host.data(), shifted_host.data(),
+                                 fit_bs, /*c_in=*/1, /*img_h=*/28, /*img_w=*/28, dir);
                 Tensor shifted_dev = Tensor::make({fit_bs, 784},
                                                  DType::BFloat16, Device::CUDA);
                 FAYN_CUDA_CHECK(cudaMemcpy(shifted_dev.data, shifted_host.data(),
@@ -463,7 +471,8 @@ float DeepELMExperiment::evaluate_tta(DataSource& ds) {
 
         std::vector<__nv_bfloat16> shifted(bs * 784);
         for (int dir = 0; dir < 4; ++dir) {
-            shift_mnist_bf16(inp_host.data(), shifted.data(), bs, dir);
+            shift_image_bf16(inp_host.data(), shifted.data(),
+                             bs, /*c_in=*/1, /*img_h=*/28, /*img_w=*/28, dir);
             add_view(shifted.data());
         }
 
@@ -1154,7 +1163,8 @@ DeepELMEnsembleExperiment::DeepELMEnsembleExperiment(
     bool             use_conv,
     int              conv_c_out,
     std::vector<int> conv_k_per_member,
-    int              n_aug_views)
+    int              n_aug_views,
+    std::string      dataset)
     : Experiment(cfg)
     , data_path_(std::move(data_path))
     , n_members_(n_members)
@@ -1167,7 +1177,14 @@ DeepELMEnsembleExperiment::DeepELMEnsembleExperiment(
     , conv_c_out_(conv_c_out)
     , conv_k_per_member_(std::move(conv_k_per_member))
     , n_aug_views_(n_aug_views)
+    , dataset_(std::move(dataset))
 {
+    if (dataset_ == "cifar10") {
+        c_in_ = 3; img_h_ = 32; img_w_ = 32; n_pixels_ = 3 * 32 * 32;
+    } else if (dataset_ != "mnist") {
+        throw std::invalid_argument(
+            "DeepELMEnsembleExperiment: dataset must be 'mnist' or 'cifar10'");
+    }
     if (!conv_k_per_member_.empty() &&
         static_cast<int>(conv_k_per_member_.size()) != n_members_)
         throw std::invalid_argument(
@@ -1181,15 +1198,19 @@ DeepELMEnsembleExperiment::DeepELMEnsembleExperiment(
 }
 
 void DeepELMEnsembleExperiment::setup() {
-    data_ = std::make_unique<MnistLoader>(
-        data_path_ + "/train-images-idx3-ubyte",
-        data_path_ + "/train-labels-idx1-ubyte");
+    if (dataset_ == "cifar10") {
+        data_      = std::make_unique<CifarLoader>(data_path_, /*train=*/true);
+        test_data_ = std::make_unique<CifarLoader>(data_path_, /*train=*/false);
+    } else {
+        data_ = std::make_unique<MnistLoader>(
+            data_path_ + "/train-images-idx3-ubyte",
+            data_path_ + "/train-labels-idx1-ubyte");
+        test_data_ = std::make_unique<MnistLoader>(
+            data_path_ + "/t10k-images-idx3-ubyte",
+            data_path_ + "/t10k-labels-idx1-ubyte");
+    }
     data_->set_output_device(Device::CUDA);
     data_->set_input_dtype(DType::BFloat16);
-
-    test_data_ = std::make_unique<MnistLoader>(
-        data_path_ + "/t10k-images-idx3-ubyte",
-        data_path_ + "/t10k-labels-idx1-ubyte");
     test_data_->set_output_device(Device::CUDA);
     test_data_->set_input_dtype(DType::BFloat16);
 
@@ -1238,11 +1259,13 @@ void DeepELMEnsembleExperiment::setup() {
             const int k_m = conv_k_per_member_.empty()
                             ? 5 : conv_k_per_member_[static_cast<size_t>(m)];
             mem.conv_front = std::make_unique<ConvFrontend>(
-                conv_c_out_, /*max_pool=*/true, k_m);
+                conv_c_out_, /*max_pool=*/true, k_m,
+                c_in_, img_h_, img_w_);
             mem.d0 = mem.conv_front->output_features();
         } else {
             mem.d0 = d0_;
-            mem.w0 = std::make_shared<DenseLayer>(784, static_cast<size_t>(mem.d0));
+            mem.w0 = std::make_shared<DenseLayer>(
+                static_cast<size_t>(n_pixels_), static_cast<size_t>(mem.d0));
             mem.w0->set_compute_stats(false);
         }
 
@@ -1263,9 +1286,9 @@ void DeepELMEnsembleExperiment::setup() {
     }
 
     const bool multi_scale = use_conv_ && !conv_k_per_member_.empty();
-    fmt::print("deep_elm_ensemble{}: {} members, d={}, n_hidden={}, N_fit={}\n",
+    fmt::print("deep_elm_ensemble{} [{}]: {} members, d={}, n_hidden={}, N_fit={}\n",
                multi_scale ? "/conv-multiscale" : (use_conv_ ? "/conv" : ""),
-               n_members_, d_, n_hidden_, N_fit_);
+               dataset_, n_members_, d_, n_hidden_, N_fit_);
 }
 
 // ---------------------------------------------------------------------------
@@ -1284,9 +1307,10 @@ Tensor DeepELMEnsembleExperiment::compute_member_h0(const Member& m) {
         Tensor H0_dev = Tensor::make(
             {static_cast<size_t>(n_aug_views_) * N_fit_, d0},
             DType::Float32, Device::CUDA);
-        std::vector<__nv_bfloat16> bf16_buf(fit_bs * 784);
-        std::vector<__nv_bfloat16> shifted_buf(fit_bs * 784);
-        Tensor x_shifted = Tensor::make({fit_bs, 784}, DType::BFloat16, Device::CUDA);
+        const size_t px = static_cast<size_t>(n_pixels_);
+        std::vector<__nv_bfloat16> bf16_buf(fit_bs * px);
+        std::vector<__nv_bfloat16> shifted_buf(fit_bs * px);
+        Tensor x_shifted = Tensor::make({fit_bs, px}, DType::BFloat16, Device::CUDA);
 
         data_->reset();
         for (size_t b = 0; b < n_batches; ++b) {
@@ -1304,12 +1328,13 @@ Tensor DeepELMEnsembleExperiment::compute_member_h0(const Member& m) {
             // Shifted views.
             FAYN_CUDA_CHECK(cudaStreamSynchronize(nullptr));
             FAYN_CUDA_CHECK(cudaMemcpy(bf16_buf.data(), batch.inputs.data,
-                                       fit_bs * 784 * sizeof(__nv_bfloat16),
+                                       fit_bs * px * sizeof(__nv_bfloat16),
                                        cudaMemcpyDeviceToHost));
             for (int dir = 0; dir < n_dirs; ++dir) {
-                shift_mnist_bf16(bf16_buf.data(), shifted_buf.data(), fit_bs, dir);
+                shift_image_bf16(bf16_buf.data(), shifted_buf.data(),
+                                 fit_bs, c_in_, img_h_, img_w_, dir);
                 FAYN_CUDA_CHECK(cudaMemcpy(x_shifted.data, shifted_buf.data(),
-                                           fit_bs * 784 * sizeof(__nv_bfloat16),
+                                           fit_bs * px * sizeof(__nv_bfloat16),
                                            cudaMemcpyHostToDevice));
                 Tensor h = m.conv_front->forward(x_shifted);
                 const size_t off = (static_cast<size_t>(dir + 1) * N_fit_ + b * fit_bs) * d0;

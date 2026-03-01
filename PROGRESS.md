@@ -34,6 +34,74 @@ layer vs deep learned representations.
 
 ---
 
+## [CP-40] CIFAR-10 dataset support
+**Date:** 2026-03-01 23:14 UTC
+
+### Infrastructure
+- `src/io/cifar_loader.hpp/.cpp`: `CifarLoader : DataSource` — reads CIFAR-10 binary
+  batch format (5 train files × 10k + test_batch.bin; 3073-byte records: 1 label +
+  3072 CHW pixels; normalization to [0,1] float32; BF16 output).
+- `src/io/CMakeLists.txt`: added `cifar_loader.cpp`.
+- `src/ops/conv_frontend.hpp/.cu`: generalized to arbitrary `c_in, img_h, img_w`.
+  `im2col_tmpl<KS>` kernel now indexes `chan * img_h * img_w + ih * img_w + iw` for
+  multi-channel. Kaiming bound uses `c_in * k²` as fan_in. Learned-conv primitives
+  guarded to `c_in=1, k=5` only (MNIST-specific, unchanged).
+- `DeepELMEnsembleExperiment`: added `dataset` parameter (`"mnist"` / `"cifar10"`).
+  Derives `c_in_`, `img_h_`, `img_w_`, `n_pixels_` at construction time. `setup()`
+  branches on `dataset_` for loader type; ConvFrontend receives `c_in_, img_h_, img_w_`.
+  `compute_member_h0()` uses `n_pixels_` instead of hardcoded 784.
+  `shift_mnist_bf16` renamed to `shift_image_bf16(…, c_in, img_h, img_w, dir)` for
+  multi-channel support.
+- New experiments in `runner.cpp`: `cifar10_conv64_ensemble_5xL2`,
+  `cifar10_conv64_aug_ensemble_5xL2`, `cifar10_conv128_ensemble_5xL2`.
+
+### CIFAR-10 Results
+
+| Experiment | Members | Aug views | C_out | d0 | Test acc |
+|---|---|---|---|---|---|
+| cifar10_conv64_ensemble_5xL2 | 5 | 0 | 64 | 12544 | **61.65%** |
+| cifar10_conv64_aug_ensemble_5xL2 | 5 | 5 | 64 | 12544 | **61.76%** |
+| cifar10_conv128_ensemble_5xL2 | 5 | 0 | 128 | 25088 | 21.17% (degenerate) |
+| cifar10_conv128_aug_ensemble_5xL2 | — | 5 | 128 | 25088 | OOM (H0 = 25 GB) |
+
+Individual conv64 no-aug member accuracies: 43–53%; ensemble at 62%.
+
+### Analysis
+- **conv64 (d0=12544): 62% ensemble accuracy** — competitive with SVM/RBF on raw
+  CIFAR-10 pixels (~55-60%) and typical ELM with random features (~60-65%). This is
+  expected: a single layer of random 5×5 filters over 3-channel 32×32 images gives
+  limited descriptive power for complex natural image structures.
+- **Augmentation: negligible** (+0.11%) — unlike MNIST where augmentation provided
+  effective regularization for wider C_out, CIFAR-10 random features are information-
+  limited regardless of sample count. The bottleneck is feature quality, not N.
+- **conv128 degenerate (21%)**: with d0=25088 and N_train=49920, N/d0 ≈ 2 (near
+  underdetermined). The Gram H0^T H0 [25088, 25088] is poorly conditioned with
+  λ=1e-4; the ELM hidden-layer solve produces near-random weights. conv64 (N/d0 ≈ 4)
+  avoids this. Practical limit: d0 ≤ N/4 for stable ELM Gram solves.
+- **conv128 + aug OOM**: H0 [249600, 25088] ≈ 25 GB leaves insufficient VRAM for
+  working tensors (H [249600, 4096] + A [25088, 25088] + T_curr [249600, 4096] = 10 GB
+  over budget). conv128 aug requires >35 GB VRAM — exceeds RTX 5090 (32 GB).
+
+### CIFAR-10 context
+
+| Method | Acc |
+|---|---|
+| Random | 10% |
+| k-NN on raw pixels | ~35% |
+| SVM, linear | ~40% |
+| SVM, RBF kernel | ~55-60% |
+| **FAYN (ours, no backprop)** | **~62%** |
+| Trained CNN (LeNet-5) | ~70-75% |
+| ResNet / VGG | ~93% |
+| SOTA (EfficientNet + aug) | ~99% |
+
+FAYN at 62% is competitive with kernel-SVM baselines without any gradient-based training.
+The gap vs trained CNNs reflects the fundamental limitation of random (untrained) features
+on complex natural images. Closing this gap requires feature learning, which in the FAYN
+framework would mean using `learn_conv` (ELM-solved conv filters) — a future direction.
+
+---
+
 ## [CP-39] 9-view augmentation + C_out=128 — 98.85% MNIST test
 **Date:** 2026-03-01 20:14 UTC
 

@@ -6,23 +6,32 @@
 namespace fayn {
 
 // ---------------------------------------------------------------------------
-// ConvFrontend: single-channel 2-D convolution + ReLU + optional 2×2 max-pool.
+// ConvFrontend: 2-D convolution + ReLU + optional 2×2 max-pool.
 //
-// For MNIST: C_in=1, H=W=28, stride=1, no padding.
-// Kernel size k ∈ {3, 5, 7} (default 5):
-//   k=3 → conv out [N, 26, 26, C_out]; after pool → [N, C_out*169]
-//   k=5 → conv out [N, 24, 24, C_out]; after pool → [N, C_out*144]
-//   k=7 → conv out [N, 22, 22, C_out]; after pool → [N, C_out*121]
+// Supports arbitrary input channels (c_in) and image sizes (img_h × img_w).
+// Default configuration matches MNIST: C_in=1, H=W=28, stride=1, no padding.
 //
-// Filters are Kaiming-initialised (U(-1/sqrt(k²), 1/sqrt(k²))) and frozen.
-// Learned-conv update primitives (compute_im2col etc.) only support k=5.
+// Kernel size k ∈ {3, 5, 7} (default 5).  Output spatial size = H-k+1, W-k+1.
+// After optional 2×2 max-pool (stride=2): (H-k+1)/2 × (W-k+1)/2.
+//
+//   MNIST (C_in=1, 28×28):
+//     k=3 → after pool [N, C_out×169]; k=5 → [N, C_out×144]; k=7 → [N, C_out×121]
+//   CIFAR-10 (C_in=3, 32×32):
+//     k=3 → after pool [N, C_out×225]; k=5 → [N, C_out×196]; k=7 → [N, C_out×169]
+//
+// Filters are Kaiming-initialised (U(-b, b), b=1/sqrt(c_in×k²)) and frozen.
+// Learned-conv update primitives (compute_im2col etc.) only support c_in=1, k=5.
 // ---------------------------------------------------------------------------
 class ConvFrontend {
 public:
-    // C_out: number of convolutional filters.
+    // C_out:   number of convolutional filters.
     // max_pool: apply 2×2 max-pool after ReLU.
-    // k: kernel size (3, 5, or 7).
-    explicit ConvFrontend(int C_out, bool max_pool = true, int k = 5);
+    // k:       kernel size (3, 5, or 7).
+    // c_in:    number of input channels (1 for MNIST, 3 for CIFAR-10).
+    // img_h:   input image height in pixels.
+    // img_w:   input image width  in pixels.
+    explicit ConvFrontend(int C_out, bool max_pool = true, int k = 5,
+                          int c_in = 1, int img_h = 28, int img_w = 28);
 
     ~ConvFrontend();
 
@@ -35,11 +44,15 @@ public:
 
     // Number of output features per sample.
     int output_features() const {
-        const int OUT = 28 - k_size_ + 1;
+        const int OUT = img_h_ - k_size_ + 1;
         return max_pool_ ? C_out_ * (OUT/2) * (OUT/2) : C_out_ * OUT * OUT;
     }
 
-    // Filter weights [C_out, 25] FP32 on CUDA.
+    int c_in()  const { return c_in_;  }
+    int img_h() const { return img_h_; }
+    int img_w() const { return img_w_; }
+
+    // Filter weights [C_out, c_in*k_size_*k_size_] FP32 on CUDA.
     Tensor&       weights()       { return W_; }
     const Tensor& weights() const { return W_; }
 
@@ -88,7 +101,10 @@ private:
     int            C_out_;
     bool           max_pool_;
     int            k_size_;   // kernel size (3, 5, or 7)
-    Tensor         W_;        // [C_out, k_size_*k_size_] FP32 on CUDA
+    int            c_in_;     // input channels (1 for MNIST, 3 for CIFAR-10)
+    int            img_h_;    // input image height
+    int            img_w_;    // input image width
+    Tensor         W_;        // [C_out, c_in*k_size_*k_size_] FP32 on CUDA
     cublasHandle_t cublas_ = nullptr;
 
     // Gram accumulators for learned-conv update (allocated on demand).

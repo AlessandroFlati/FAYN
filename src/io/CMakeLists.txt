@@ -1,5 +1,6 @@
 add_library(fayn_io STATIC
     mnist_loader.cpp
+    cifar_loader.cpp
     logger.cpp
 )
 

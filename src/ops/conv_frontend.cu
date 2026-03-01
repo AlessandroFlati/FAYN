@@ -13,20 +13,20 @@
 namespace fayn {
 namespace {
 
-// MNIST image dimensions (fixed).
-static constexpr int IMG_H = 28;
-static constexpr int IMG_W = 28;
-
-// K=5 geometry — used only by the learned-conv primitives (which don't support other K).
-static constexpr int K5_OUT = IMG_H - 5 + 1;   // 24
-static constexpr int K5_P   = K5_OUT * K5_OUT;  // 576
-static constexpr int K5_KA  = 5 * 5;            // 25
+// K=5 / MNIST geometry — used only by the learned-conv primitives.
+static constexpr int MNIST_H  = 28;
+static constexpr int K5_OUT   = MNIST_H - 5 + 1;   // 24
+static constexpr int K5_P     = K5_OUT * K5_OUT;    // 576
+static constexpr int K5_KA    = 5 * 5;              // 25
 
 // ---------------------------------------------------------------------------
-// im2col_tmpl<KS>: extract KS×KS patches from BF16 images.
+// im2col_tmpl<KS>: extract C_in×KS×KS patches from BF16 images.
 //
-// x   [N, 784] BF16 (flat, row-major)
-// col [N*P, KS*KS] FP32  (one row per spatial position, one col per patch pixel)
+// x   [N, c_in*img_h*img_w] BF16  (CHW layout per image)
+// col [N*P, c_in*KS*KS] FP32      (one row per spatial position per image)
+//
+// col[idx] where idx = (n*P + ph*OUT+pw) * KA_C + c*KA + kh*KS + kw
+//        = x[n * c_in*img_h*img_w + c * img_h*img_w + (ph+kh)*img_w + (pw+kw)]
 //
 // Supported KS: 3, 5, 7.  Grid-stride loop: one thread per element of col.
 // ---------------------------------------------------------------------------
@@ -34,39 +34,43 @@ template <int KS>
 __global__ void im2col_tmpl(
     const __nv_bfloat16* __restrict__ x,
     float*               __restrict__ col,
-    int N)
+    int N, int c_in, int img_h, int img_w)
 {
-    constexpr int OUT  = IMG_H - KS + 1;  // IMG is square
-    constexpr int P    = OUT * OUT;
-    constexpr int KA   = KS * KS;
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int total = N * P * KA;
-    for (; idx < total; idx += (int)(blockDim.x * gridDim.x)) {
-        const int k   = idx % KA;
-        const int row = idx / KA;
-        const int n   = row / P;
-        const int hw  = row % P;
-        const int oh  = hw / OUT;
-        const int ow  = hw % OUT;
-        const int kh  = k / KS;
-        const int kw  = k % KS;
-        const int ih  = oh + kh;
-        const int iw  = ow + kw;
-        col[row * KA + k] = __bfloat162float(x[n * IMG_H * IMG_W + ih * IMG_W + iw]);
+    const int OUT   = img_h - KS + 1;
+    const int P     = OUT * OUT;
+    const int KA    = KS * KS;
+    const int KA_C  = c_in * KA;          // elements per output column
+    const int total = N * P * KA_C;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total; idx += (int)(blockDim.x * gridDim.x)) {
+        const int elem = idx % KA_C;       // position within one output column
+        const int sp   = (idx / KA_C) % P; // spatial patch index
+        const int n    = idx / (KA_C * P);
+        const int chan  = elem / KA;
+        const int kern  = elem % KA;
+        const int kh    = kern / KS;
+        const int kw    = kern % KS;
+        const int oh    = sp / OUT;
+        const int ow    = sp % OUT;
+        const int ih    = oh + kh;
+        const int iw    = ow + kw;
+        col[idx] = __bfloat162float(
+            x[n * c_in * img_h * img_w + chan * img_h * img_w + ih * img_w + iw]);
     }
 }
 
 // Dispatch im2col for the given runtime kernel size.
-// col must be pre-allocated to [N * (28-k+1)^2, k*k] FP32.
-static void launch_im2col(const __nv_bfloat16* x, float* col, int N, int k_size) {
-    const int OUT   = IMG_H - k_size + 1;
-    const int total = N * OUT * OUT * k_size * k_size;
+// col must be pre-allocated to [N*(img_h-k+1)*(img_w-k+1), c_in*k*k] FP32.
+static void launch_im2col(const __nv_bfloat16* x, float* col,
+                           int N, int k_size, int c_in, int img_h, int img_w) {
+    const int OUT   = img_h - k_size + 1;
+    const int total = N * OUT * OUT * k_size * k_size * c_in;
     const int blk   = 256;
     const int grd   = (total + blk - 1) / blk;
     switch (k_size) {
-        case 3: im2col_tmpl<3><<<grd, blk>>>(x, col, N); break;
-        case 5: im2col_tmpl<5><<<grd, blk>>>(x, col, N); break;
-        case 7: im2col_tmpl<7><<<grd, blk>>>(x, col, N); break;
+        case 3: im2col_tmpl<3><<<grd, blk>>>(x, col, N, c_in, img_h, img_w); break;
+        case 5: im2col_tmpl<5><<<grd, blk>>>(x, col, N, c_in, img_h, img_w); break;
+        case 7: im2col_tmpl<7><<<grd, blk>>>(x, col, N, c_in, img_h, img_w); break;
         default: throw std::invalid_argument(
             "ConvFrontend: unsupported kernel size (must be 3, 5, or 7)");
     }
@@ -135,14 +139,21 @@ __global__ void upsample_2x_nhwc(
 // ConvFrontend implementation
 // ---------------------------------------------------------------------------
 
-ConvFrontend::ConvFrontend(int C_out, bool max_pool, int k)
+ConvFrontend::ConvFrontend(int C_out, bool max_pool, int k,
+                           int c_in, int img_h, int img_w)
     : C_out_(C_out)
     , max_pool_(max_pool)
     , k_size_(k)
-    , W_(Tensor::make({(size_t)C_out, (size_t)(k * k)}, DType::Float32, Device::CUDA))
+    , c_in_(c_in)
+    , img_h_(img_h)
+    , img_w_(img_w)
+    , W_(Tensor::make({(size_t)C_out, (size_t)(c_in * k * k)},
+                      DType::Float32, Device::CUDA))
 {
     if (k != 3 && k != 5 && k != 7)
         throw std::invalid_argument("ConvFrontend: k must be 3, 5, or 7");
+    if (c_in < 1)
+        throw std::invalid_argument("ConvFrontend: c_in must be >= 1");
     FAYN_CUBLAS_CHECK(cublasCreate(&cublas_));
     kaiming_init();
 }
@@ -156,8 +167,8 @@ ConvFrontend::~ConvFrontend() {
 static std::atomic<uint64_t> conv_kaiming_seed{42};
 
 void ConvFrontend::kaiming_init() {
-    // Kaiming uniform: U(-k, k) where k = 1/sqrt(fan_in), fan_in = C_in * kH * kW.
-    const int   karea = k_size_ * k_size_;
+    // Kaiming uniform: U(-b, b) where b = 1/sqrt(fan_in), fan_in = c_in * kH * kW.
+    const int   karea = c_in_ * k_size_ * k_size_;
     const float bound = 1.f / std::sqrt(static_cast<float>(karea));
     const uint64_t seed = conv_kaiming_seed.fetch_add(1, std::memory_order_relaxed);
     std::mt19937 rng(seed);
@@ -176,13 +187,14 @@ Tensor ConvFrontend::forward(const Tensor& x) const {
         throw std::invalid_argument("ConvFrontend::forward: x must be on CUDA");
 
     const int N    = static_cast<int>(x.shape[0]);
-    const int OUT  = IMG_H - k_size_ + 1;  // e.g. 26 (K=3), 24 (K=5), 22 (K=7)
+    const int OUT  = img_h_ - k_size_ + 1;
     const int P    = OUT * OUT;
-    const int KA   = k_size_ * k_size_;
+    const int KA   = c_in_ * k_size_ * k_size_;   // elements per output column
 
     // ---- Step 1: im2col → col [N*P, KA] FP32 ----
     Tensor col = Tensor::make({(size_t)(N * P), (size_t)KA}, DType::Float32, Device::CUDA);
-    launch_im2col((const __nv_bfloat16*)x.data, (float*)col.data, N, k_size_);
+    launch_im2col((const __nv_bfloat16*)x.data, (float*)col.data,
+                  N, k_size_, c_in_, img_h_, img_w_);
     FAYN_CUDA_CHECK(cudaGetLastError());
 
     // ---- Step 2: GEMM — act [N*P, C_out] = col [N*P, KA] × W^T [KA, C_out] ----
@@ -237,11 +249,11 @@ Tensor ConvFrontend::forward(const Tensor& x) const {
 // ---------------------------------------------------------------------------
 
 Tensor ConvFrontend::compute_im2col(const Tensor& x) const {
-    if (k_size_ != 5)
-        throw std::logic_error("ConvFrontend::compute_im2col: only supported for K=5");
+    if (c_in_ != 1 || k_size_ != 5)
+        throw std::logic_error("ConvFrontend::compute_im2col: only supported for c_in=1, K=5");
     const int N = static_cast<int>(x.shape[0]);
     Tensor col = Tensor::make({(size_t)(N * K5_P), (size_t)K5_KA}, DType::Float32, Device::CUDA);
-    launch_im2col((const __nv_bfloat16*)x.data, (float*)col.data, N, 5);
+    launch_im2col((const __nv_bfloat16*)x.data, (float*)col.data, N, 5, 1, MNIST_H, MNIST_H);
     FAYN_CUDA_CHECK(cudaGetLastError());
     FAYN_CUDA_CHECK(cudaDeviceSynchronize());
     return col;

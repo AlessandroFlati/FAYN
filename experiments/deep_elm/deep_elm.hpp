@@ -5,6 +5,7 @@
 #include "src/ops/dense.hpp"
 #include "src/ops/elm_solver.hpp"
 #include "src/io/mnist_loader.hpp"
+#include "src/io/cifar_loader.hpp"
 
 #include <memory>
 #include <string>
@@ -251,6 +252,7 @@ public:
     //   5 → original + 4 axis-aligned 1-pixel shifts.
     //   9 → original + 4 axis-aligned + 4 diagonal 1-pixel shifts.
     //   Only supported with use_conv=true (forward pass must be FP32).
+    // dataset: "mnist" (C_in=1, 28×28) or "cifar10" (C_in=3, 32×32).
     DeepELMEnsembleExperiment(const ExperimentConfig& cfg,
                               std::string data_path,
                               int                n_members        = 5,
@@ -262,7 +264,8 @@ public:
                               bool               use_conv         = false,
                               int                conv_c_out       = 64,
                               std::vector<int>   conv_k_per_member = {},
-                              int                n_aug_views      = 0);
+                              int                n_aug_views      = 0,
+                              std::string        dataset          = "mnist");
 
     void  setup()           override;
     float run_epoch(size_t) override;
@@ -283,6 +286,13 @@ private:
     int              conv_c_out_;
     std::vector<int> conv_k_per_member_;
     int              n_aug_views_;  // 0=none, 5=4-dir, 9=8-dir
+    std::string      dataset_;      // "mnist" or "cifar10"
+
+    // Derived from dataset_:
+    int c_in_     = 1;    // input channels
+    int img_h_    = 28;   // input image height
+    int img_w_    = 28;   // input image width
+    int n_pixels_ = 784;  // c_in * img_h * img_w
 
     std::vector<Member> members_;
     ElmSolver           solver_;
@@ -298,7 +308,7 @@ private:
     float               evaluate(DataSource& ds);
     void                write_fp32_weights(DenseLayer& layer, const Tensor& W_fp32);
 
-    std::unique_ptr<MnistLoader> test_data_;
+    std::unique_ptr<DataSource> test_data_;
 };
 
 } // namespace fayn

@@ -1162,6 +1162,74 @@ namespace {
     return true;
 }();
 
+// ---------------------------------------------------------------------------
+// CIFAR-10 experiments
+// Conv k=5, CIFAR-10 (C_in=3, 32×32): d0 = C_out * 14 * 14 (auto from ConvFrontend).
+// ---------------------------------------------------------------------------
+// 5-member conv64 L2, no augmentation.
+// conv64: d0 = 64 * 14 * 14 = 12544 (5×5 k, 32×32 → pool → 14×14).
+[[maybe_unused]] static const bool _fayn_reg_cifar10_conv64_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "cifar10_conv64_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/cifar10",
+                /*n_members=*/5, /*d0=*/0, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/0, /*dataset=*/"cifar10");
+        });
+    return true;
+}();
+// 5-member conv64 L2 with 5-view augmentation.
+[[maybe_unused]] static const bool _fayn_reg_cifar10_conv64_aug_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "cifar10_conv64_aug_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/cifar10",
+                /*n_members=*/5, /*d0=*/0, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/5, /*dataset=*/"cifar10");
+        });
+    return true;
+}();
+// 5-member conv128 L2, no augmentation (aug OOM: H0 [249600,25088]=25GB > 32GB budget).
+// conv128: d0 = 128 * 14 * 14 = 25088. N_eff = 49920 → H0 = 5 GB. Safe.
+[[maybe_unused]] static const bool _fayn_reg_cifar10_conv128_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "cifar10_conv128_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/cifar10",
+                /*n_members=*/5, /*d0=*/0, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/128,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/0, /*dataset=*/"cifar10");
+        });
+    return true;
+}();
+// 5-member conv128 L2 with 5-view augmentation.
+// NOTE: aug OOM with conv128 (H0 [249600,25088]=25GB). This version kept for reference.
+[[maybe_unused]] static const bool _fayn_reg_cifar10_conv128_aug_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "cifar10_conv128_aug_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/cifar10",
+                /*n_members=*/5, /*d0=*/0, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/128,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/5, /*dataset=*/"cifar10");
+        });
+    return true;
+}();
+
 // Test-time augmentation (TTA): average logits over original + 4 pixel-shifted views.
 // Same trained model as deep_elm_4096_L3; only inference changes.
 [[maybe_unused]] static const bool _fayn_reg_deep_elm_tta_4096_L3 = []() {
