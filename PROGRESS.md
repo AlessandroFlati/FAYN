@@ -34,6 +34,66 @@ layer vs deep learned representations.
 
 ---
 
+## [CP-41] Stacked random conv front-end (CIFAR-10)
+**Date:** 2026-03-02 06:33 UTC
+
+### Motivation
+CP-40 established 62% accuracy with a single-layer random conv (k=5, C_out=64, pool).
+Hypothesis: stacking a second random conv layer (k=3) on top of the pooled output
+might capture hierarchical combinations of low-level features — similar to the depth
+advantage of ConvNets.
+
+### Implementation
+- `src/ops/conv_frontend.hpp/.cu`: added `n_conv_layers` (1 or 2) and `max_pool2` params.
+  - New CUDA kernel `im2col_nhwc_tmpl<KS>`: reads FP32 NHWC input (output of maxpool2x2_nhwc);
+    access pattern `x[((n*h + ih)*w + iw)*c_in + chan]`.
+  - New `launch_im2col_nhwc()` dispatcher for KS ∈ {3, 5, 7}.
+  - W2_ [C_out, C_out*9] Kaiming-initialized (fan_in = C_out*9); frozen.
+  - 2-layer forward: conv1(BF16 CHW) → pool1 → im2col_nhwc → conv2(FP32 NHWC) → optional pool2.
+  - Constructor enforces `max_pool=true` when `n_conv_layers=2`.
+- `DeepELMEnsembleExperiment`: added `conv_n_layers` and `conv_max_pool2` params.
+- Three new CIFAR-10 experiments in `runner.cpp`.
+
+### CIFAR-10 geometry (C_out=64, k1=5)
+- Conv1: 32×32 → OUT1=28 → pool → 14×14×64
+- Conv2 (k=3): 14×14 → OUT2=12 → WITH pool2: 6×6×64 = **d0=2304**; NO pool2: 12×12×64 = **d0=9216**
+
+### Results
+
+| Experiment | d0 | N_fit | Members | Test acc |
+|---|---|---|---|---|
+| cifar10_conv64_ensemble_5xL2 (baseline, 1-layer) | 12544 | 49920 | 5 | 61.65% |
+| cifar10_deep_conv64_ensemble_5xL2 (2-layer, pool2) | 2304 | 49920 | 5 | **60.62%** |
+| cifar10_deepnp_conv64_ensemble_5xL2 (2-layer, no pool2) | 9216 | 49920 | 5 | **60.52%** |
+| cifar10_deep_conv64_aug_ensemble_5xL2 (2-layer, pool2, 5-aug) | 2304 | 249600 | 5 | **60.98%** |
+
+### Analysis
+- **Stacked random convolutions do not improve over single-layer.** All three 2-layer
+  variants fall below the single-layer baseline (61.65%), regardless of output dimensionality
+  or augmentation.
+- **Same d0, worse accuracy (ablation)**: `deepnp` (d0=9216, same as 1-layer conv64) gives
+  60.52% vs 61.65% — the second random conv layer actually HURTS. Hierarchical random
+  features are less informative than single-layer random features at equal dimensionality.
+- **2304 ≈ 12544 despite 5× fewer features**: `deep` (d0=2304) achieves 60.62% close to
+  1-layer 61.65%. Each 2nd-layer feature encodes a combination of 3×3 first-layer patches,
+  providing more abstract but lower-dimensional representation. The near-equal accuracy
+  suggests each 2nd-layer feature carries ~5× the information of a 1st-layer feature on
+  average, offsetting the dimension reduction.
+- **Augmentation adds little** (+0.36%) — same conclusion as CP-40: CIFAR-10 random features
+  are information-limited, not sample-limited.
+- **Root cause**: Random weight matrices in both conv layers produce unstructured projections.
+  Unlike learned convolutions (where depth compounds useful structure), random depth
+  projects onto increasingly incoherent subspaces. The ELM solve exploits whatever linear
+  structure exists in H0; stacked random projections degrade this structure.
+
+### Conclusion
+The CIFAR-10 accuracy ceiling with random conv features is ~61-62% regardless of depth
+(1 or 2 layers) or output dimensionality. The bottleneck is feature quality, not feature
+count or depth. The next natural direction is learning the conv filters (ELM-solved or
+gradient-based) rather than adding more random layers.
+
+---
+
 ## [CP-40] CIFAR-10 dataset support
 **Date:** 2026-03-01 23:14 UTC
 

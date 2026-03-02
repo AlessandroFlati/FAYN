@@ -59,6 +59,61 @@ __global__ void im2col_tmpl(
     }
 }
 
+// ---------------------------------------------------------------------------
+// im2col_nhwc_tmpl<KS>: extract C_in x KS x KS patches from FP32 NHWC images.
+//
+// x   [N, img_h, img_w, c_in] FP32  (NHWC layout — output of maxpool2x2_nhwc)
+// col [N*P, c_in*KS*KS] FP32        (one row per spatial position per image)
+//
+// NHWC access: x[((n*img_h + ih)*img_w + iw)*c_in + chan]
+//
+// Supported KS: 3, 5, 7.  Grid-stride loop: one thread per element of col.
+// ---------------------------------------------------------------------------
+template <int KS>
+__global__ void im2col_nhwc_tmpl(
+    const float* __restrict__ x,
+    float*       __restrict__ col,
+    int N, int c_in, int img_h, int img_w)
+{
+    const int OUT   = img_h - KS + 1;
+    const int P     = OUT * OUT;
+    const int KA    = KS * KS;
+    const int KA_C  = c_in * KA;
+    const int total = N * P * KA_C;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total; idx += (int)(blockDim.x * gridDim.x)) {
+        const int elem  = idx % KA_C;
+        const int sp    = (idx / KA_C) % P;
+        const int n     = idx / (KA_C * P);
+        const int chan  = elem / KA;
+        const int kern  = elem % KA;
+        const int kh    = kern / KS;
+        const int kw    = kern % KS;
+        const int oh    = sp / OUT;
+        const int ow    = sp % OUT;
+        const int ih    = oh + kh;
+        const int iw    = ow + kw;
+        col[idx] = x[((n * img_h + ih) * img_w + iw) * c_in + chan];
+    }
+}
+
+// Dispatch NHWC im2col for the given runtime kernel size.
+// col must be pre-allocated to [N*(img_h-k+1)*(img_w-k+1), c_in*k*k] FP32.
+static void launch_im2col_nhwc(const float* x, float* col,
+                                int N, int k_size, int c_in, int img_h, int img_w) {
+    const int OUT   = img_h - k_size + 1;
+    const int total = N * OUT * OUT * k_size * k_size * c_in;
+    const int blk   = 256;
+    const int grd   = (total + blk - 1) / blk;
+    switch (k_size) {
+        case 3: im2col_nhwc_tmpl<3><<<grd, blk>>>(x, col, N, c_in, img_h, img_w); break;
+        case 5: im2col_nhwc_tmpl<5><<<grd, blk>>>(x, col, N, c_in, img_h, img_w); break;
+        case 7: im2col_nhwc_tmpl<7><<<grd, blk>>>(x, col, N, c_in, img_h, img_w); break;
+        default: throw std::invalid_argument(
+            "ConvFrontend: unsupported kernel size for NHWC im2col (must be 3, 5, or 7)");
+    }
+}
+
 // Dispatch im2col for the given runtime kernel size.
 // col must be pre-allocated to [N*(img_h-k+1)*(img_w-k+1), c_in*k*k] FP32.
 static void launch_im2col(const __nv_bfloat16* x, float* col,
@@ -139,14 +194,21 @@ __global__ void upsample_2x_nhwc(
 // ConvFrontend implementation
 // ---------------------------------------------------------------------------
 
+// Global seed counter — each ConvFrontend instance gets a unique seed so that
+// ensemble members receive different random filter initialisations.
+static std::atomic<uint64_t> conv_kaiming_seed{42};
+
 ConvFrontend::ConvFrontend(int C_out, bool max_pool, int k,
-                           int c_in, int img_h, int img_w)
+                           int c_in, int img_h, int img_w,
+                           int n_conv_layers, bool max_pool2)
     : C_out_(C_out)
     , max_pool_(max_pool)
     , k_size_(k)
     , c_in_(c_in)
     , img_h_(img_h)
     , img_w_(img_w)
+    , n_conv_layers_(n_conv_layers)
+    , max_pool2_(max_pool2)
     , W_(Tensor::make({(size_t)C_out, (size_t)(c_in * k * k)},
                       DType::Float32, Device::CUDA))
 {
@@ -154,17 +216,31 @@ ConvFrontend::ConvFrontend(int C_out, bool max_pool, int k,
         throw std::invalid_argument("ConvFrontend: k must be 3, 5, or 7");
     if (c_in < 1)
         throw std::invalid_argument("ConvFrontend: c_in must be >= 1");
+    if (n_conv_layers_ != 1 && n_conv_layers_ != 2)
+        throw std::invalid_argument("ConvFrontend: n_conv_layers must be 1 or 2");
+    if (n_conv_layers_ == 2 && !max_pool_)
+        throw std::invalid_argument("ConvFrontend: n_conv_layers=2 requires max_pool=true");
     FAYN_CUBLAS_CHECK(cublasCreate(&cublas_));
     kaiming_init();
+    if (n_conv_layers_ == 2) {
+        // W2_: [C_out, C_out*9], conv2 has k=3, c_in=C_out.
+        W2_ = Tensor::make({(size_t)C_out_, (size_t)(C_out_ * 9)},
+                           DType::Float32, Device::CUDA);
+        const float bound2 = 1.f / std::sqrt(static_cast<float>(C_out_ * 9));
+        const uint64_t seed2 = conv_kaiming_seed.fetch_add(1, std::memory_order_relaxed);
+        std::mt19937 rng2(seed2);
+        std::uniform_real_distribution<float> dist2(-bound2, bound2);
+        std::vector<float> w2_host(static_cast<size_t>(C_out_) * C_out_ * 9);
+        for (auto& v : w2_host) v = dist2(rng2);
+        FAYN_CUDA_CHECK(cudaMemcpy(W2_.data, w2_host.data(),
+                                   w2_host.size() * sizeof(float),
+                                   cudaMemcpyHostToDevice));
+    }
 }
 
 ConvFrontend::~ConvFrontend() {
     if (cublas_) cublasDestroy(cublas_);
 }
-
-// Global seed counter — each ConvFrontend instance gets a unique seed so that
-// ensemble members receive different random filter initialisations.
-static std::atomic<uint64_t> conv_kaiming_seed{42};
 
 void ConvFrontend::kaiming_init() {
     // Kaiming uniform: U(-b, b) where b = 1/sqrt(fan_in), fan_in = c_in * kH * kW.
@@ -187,57 +263,115 @@ Tensor ConvFrontend::forward(const Tensor& x) const {
         throw std::invalid_argument("ConvFrontend::forward: x must be on CUDA");
 
     const int N    = static_cast<int>(x.shape[0]);
-    const int OUT  = img_h_ - k_size_ + 1;
-    const int P    = OUT * OUT;
-    const int KA   = c_in_ * k_size_ * k_size_;   // elements per output column
+    const int OUT1 = img_h_ - k_size_ + 1;
+    const int P1   = OUT1 * OUT1;
+    const int KA1  = c_in_ * k_size_ * k_size_;   // elements per output column (layer 1)
 
-    // ---- Step 1: im2col → col [N*P, KA] FP32 ----
-    Tensor col = Tensor::make({(size_t)(N * P), (size_t)KA}, DType::Float32, Device::CUDA);
-    launch_im2col((const __nv_bfloat16*)x.data, (float*)col.data,
+    // ---- Layer 1 Step 1: im2col -> col1 [N*P1, KA1] FP32 ----
+    Tensor col1 = Tensor::make({(size_t)(N * P1), (size_t)KA1}, DType::Float32, Device::CUDA);
+    launch_im2col((const __nv_bfloat16*)x.data, (float*)col1.data,
                   N, k_size_, c_in_, img_h_, img_w_);
     FAYN_CUDA_CHECK(cudaGetLastError());
 
-    // ---- Step 2: GEMM — act [N*P, C_out] = col [N*P, KA] × W^T [KA, C_out] ----
+    // ---- Layer 1 Step 2: GEMM — act1 [N*P1, C_out] = col1 x W^T ----
     //
-    // Row-major duality: act_rm [M, C_out] = col_rm [M, KA] × W_rm^T [C_out, KA]
+    // Row-major duality: act_rm [M, C_out] = col_rm [M, KA] x W_rm^T [C_out, KA]
     //   cublasSgemm(OP_T, OP_N, C_out, M, KA, 1, W_, KA, col, KA, 0, act, C_out)
-    Tensor act = Tensor::make({(size_t)(N * P), (size_t)C_out_}, DType::Float32, Device::CUDA);
+    Tensor act1 = Tensor::make({(size_t)(N * P1), (size_t)C_out_}, DType::Float32, Device::CUDA);
     {
         const float alpha = 1.f, beta = 0.f;
         FAYN_CUBLAS_CHECK(cublasSgemm(cublas_,
             CUBLAS_OP_T, CUBLAS_OP_N,
-            C_out_, N * P, KA,
+            C_out_, N * P1, KA1,
             &alpha,
-            (float*)W_.data,  KA,
-            (float*)col.data, KA,
+            (float*)W_.data,   KA1,
+            (float*)col1.data, KA1,
             &beta,
-            (float*)act.data, C_out_));
+            (float*)act1.data, C_out_));
     }
 
-    // ---- Step 3: ReLU in-place ----
-    apply_relu(act, /*stream=*/nullptr);
+    // ---- Layer 1 Step 3: ReLU in-place ----
+    apply_relu(act1, /*stream=*/nullptr);
 
     if (!max_pool_) {
-        Tensor out = Tensor::make({(size_t)N, (size_t)(P * C_out_)},
+        // n_conv_layers_ == 1, no pool. (Constructor enforces max_pool_=true for n_conv_layers_=2.)
+        Tensor out = Tensor::make({(size_t)N, (size_t)(P1 * C_out_)},
                                   DType::Float32, Device::CUDA);
-        FAYN_CUDA_CHECK(cudaMemcpy(out.data, act.data,
-                                   (size_t)N * P * C_out_ * sizeof(float),
+        FAYN_CUDA_CHECK(cudaMemcpy(out.data, act1.data,
+                                   (size_t)N * P1 * C_out_ * sizeof(float),
                                    cudaMemcpyDeviceToDevice));
+        FAYN_CUDA_CHECK(cudaDeviceSynchronize());
         return out;
     }
 
-    // ---- Step 4: 2×2 max-pool ----
-    // act NHWC layout [N, OUT, OUT, C_out].  Pool output: [N, OUT/2, OUT/2, C_out].
-    const int pool_H = OUT / 2;
-    const int pool_W = OUT / 2;
-    Tensor out = Tensor::make({(size_t)N, (size_t)(pool_H * pool_W * C_out_)},
-                              DType::Float32, Device::CUDA);
+    // ---- Layer 1 Step 4: 2x2 max-pool ----
+    // act1 NHWC layout [N, OUT1, OUT1, C_out].  pooled1: [N, pool_H1*pool_W1*C_out].
+    const int pool_H1 = OUT1 / 2;
+    const int pool_W1 = OUT1 / 2;
+    Tensor pooled1 = Tensor::make({(size_t)N, (size_t)(pool_H1 * pool_W1 * C_out_)},
+                                   DType::Float32, Device::CUDA);
     {
-        const int total   = N * pool_H * pool_W * C_out_;
+        const int total   = N * pool_H1 * pool_W1 * C_out_;
         const int threads = 256;
         const int blocks  = (total + threads - 1) / threads;
         maxpool2x2_nhwc<<<blocks, threads>>>(
-            (const float*)act.data, (float*)out.data, N, OUT, OUT, C_out_);
+            (const float*)act1.data, (float*)pooled1.data, N, OUT1, OUT1, C_out_);
+        FAYN_CUDA_CHECK(cudaGetLastError());
+    }
+
+    if (n_conv_layers_ == 1) {
+        FAYN_CUDA_CHECK(cudaDeviceSynchronize());
+        return pooled1;
+    }
+
+    // ---- Layer 2: NHWC FP32 im2col -> GEMM -> ReLU -> optional pool2 ----
+    // pooled1 is in NHWC layout: [N, pool_H1, pool_W1, C_out_].
+    // Layer 2 uses k=3 (hardcoded); c_in2 = C_out_.
+    const int OUT2 = pool_H1 - 3 + 1;
+    const int P2   = OUT2 * OUT2;
+    const int KA2  = C_out_ * 9;   // C_out * 3 * 3
+
+    Tensor col2 = Tensor::make({(size_t)(N * P2), (size_t)KA2}, DType::Float32, Device::CUDA);
+    launch_im2col_nhwc((const float*)pooled1.data, (float*)col2.data,
+                       N, /*k_size=*/3, C_out_, pool_H1, pool_W1);
+    FAYN_CUDA_CHECK(cudaGetLastError());
+
+    Tensor act2 = Tensor::make({(size_t)(N * P2), (size_t)C_out_}, DType::Float32, Device::CUDA);
+    {
+        const float alpha = 1.f, beta = 0.f;
+        FAYN_CUBLAS_CHECK(cublasSgemm(cublas_,
+            CUBLAS_OP_T, CUBLAS_OP_N,
+            C_out_, N * P2, KA2,
+            &alpha,
+            (float*)W2_.data,  KA2,
+            (float*)col2.data, KA2,
+            &beta,
+            (float*)act2.data, C_out_));
+    }
+
+    apply_relu(act2, /*stream=*/nullptr);
+
+    if (!max_pool2_) {
+        Tensor out = Tensor::make({(size_t)N, (size_t)(P2 * C_out_)},
+                                  DType::Float32, Device::CUDA);
+        FAYN_CUDA_CHECK(cudaMemcpy(out.data, act2.data,
+                                   (size_t)N * P2 * C_out_ * sizeof(float),
+                                   cudaMemcpyDeviceToDevice));
+        FAYN_CUDA_CHECK(cudaDeviceSynchronize());
+        return out;
+    }
+
+    // Second max-pool: act2 NHWC [N, OUT2, OUT2, C_out] -> [N, (OUT2/2)*(OUT2/2)*C_out].
+    const int pool_H2 = OUT2 / 2;
+    const int pool_W2 = OUT2 / 2;
+    Tensor out = Tensor::make({(size_t)N, (size_t)(pool_H2 * pool_W2 * C_out_)},
+                              DType::Float32, Device::CUDA);
+    {
+        const int total   = N * pool_H2 * pool_W2 * C_out_;
+        const int threads = 256;
+        const int blocks  = (total + threads - 1) / threads;
+        maxpool2x2_nhwc<<<blocks, threads>>>(
+            (const float*)act2.data, (float*)out.data, N, OUT2, OUT2, C_out_);
         FAYN_CUDA_CHECK(cudaGetLastError());
     }
     FAYN_CUDA_CHECK(cudaDeviceSynchronize());

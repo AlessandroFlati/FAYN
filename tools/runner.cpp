@@ -1229,6 +1229,57 @@ namespace {
         });
     return true;
 }();
+// ---------------------------------------------------------------------------
+// CIFAR-10 -- 2-layer stacked random conv front-end (n_conv_layers=2, k1=5, k2=3).
+// ---------------------------------------------------------------------------
+// WITH 2nd pool: d0 = 64 * 6 * 6 = 2304.  H0 [249600, 2304] = 2.3 GB.  Very safe.
+[[maybe_unused]] static const bool _fayn_reg_cifar10_deep_conv64_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "cifar10_deep_conv64_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/cifar10",
+                /*n_members=*/5, /*d0=*/0, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/0, /*dataset=*/"cifar10",
+                /*conv_n_layers=*/2, /*conv_max_pool2=*/true);
+        });
+    return true;
+}();
+// NO 2nd pool: d0 = 64 * 12 * 12 = 9216.  Same d0 as cifar10_conv64 -- ablation.
+[[maybe_unused]] static const bool _fayn_reg_cifar10_deepnp_conv64_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "cifar10_deepnp_conv64_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/cifar10",
+                /*n_members=*/5, /*d0=*/0, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/0, /*dataset=*/"cifar10",
+                /*conv_n_layers=*/2, /*conv_max_pool2=*/false);
+        });
+    return true;
+}();
+// WITH 2nd pool + 5-view aug: d0=2304, N_aug=249600. H0 [249600, 2304] = 2.3 GB.
+[[maybe_unused]] static const bool _fayn_reg_cifar10_deep_conv64_aug_ensemble_5xL2 = []() {
+    fayn::ExperimentRegistry::instance().register_experiment(
+        "cifar10_deep_conv64_aug_ensemble_5xL2",
+        [](const fayn::ExperimentConfig& cfg) {
+            return std::make_unique<fayn::DeepELMEnsembleExperiment>(
+                cfg, "data/cifar10",
+                /*n_members=*/5, /*d0=*/0, /*d=*/4096,
+                /*n_hidden=*/1, /*n_cycles=*/5, /*lambda=*/1e-4f,
+                /*use_conv=*/true, /*conv_c_out=*/64,
+                /*conv_k_per_member=*/std::vector<int>{},
+                /*n_aug_views=*/5, /*dataset=*/"cifar10",
+                /*conv_n_layers=*/2, /*conv_max_pool2=*/true);
+        });
+    return true;
+}();
 
 // Test-time augmentation (TTA): average logits over original + 4 pixel-shifted views.
 // Same trained model as deep_elm_4096_L3; only inference changes.

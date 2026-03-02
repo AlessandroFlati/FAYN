@@ -253,6 +253,8 @@ public:
     //   9 → original + 4 axis-aligned + 4 diagonal 1-pixel shifts.
     //   Only supported with use_conv=true (forward pass must be FP32).
     // dataset: "mnist" (C_in=1, 28×28) or "cifar10" (C_in=3, 32×32).
+    // conv_n_layers: 1 (default) or 2 (stacked random conv; requires max_pool=true).
+    // conv_max_pool2: apply 2×2 max-pool after conv2 (conv_n_layers=2 only).
     DeepELMEnsembleExperiment(const ExperimentConfig& cfg,
                               std::string data_path,
                               int                n_members        = 5,
@@ -265,7 +267,9 @@ public:
                               int                conv_c_out       = 64,
                               std::vector<int>   conv_k_per_member = {},
                               int                n_aug_views      = 0,
-                              std::string        dataset          = "mnist");
+                              std::string        dataset          = "mnist",
+                              int                conv_n_layers    = 1,
+                              bool               conv_max_pool2   = true);
 
     void  setup()           override;
     float run_epoch(size_t) override;
@@ -285,8 +289,10 @@ private:
     bool             use_conv_;
     int              conv_c_out_;
     std::vector<int> conv_k_per_member_;
-    int              n_aug_views_;  // 0=none, 5=4-dir, 9=8-dir
-    std::string      dataset_;      // "mnist" or "cifar10"
+    int              n_aug_views_;   // 0=none, 5=4-dir, 9=8-dir
+    std::string      dataset_;       // "mnist" or "cifar10"
+    int              conv_n_layers_; // 1 or 2 (stacked random conv)
+    bool             conv_max_pool2_; // 2nd layer max-pool flag
 
     // Derived from dataset_:
     int c_in_     = 1;    // input channels

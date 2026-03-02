@@ -1164,7 +1164,9 @@ DeepELMEnsembleExperiment::DeepELMEnsembleExperiment(
     int              conv_c_out,
     std::vector<int> conv_k_per_member,
     int              n_aug_views,
-    std::string      dataset)
+    std::string      dataset,
+    int              conv_n_layers,
+    bool             conv_max_pool2)
     : Experiment(cfg)
     , data_path_(std::move(data_path))
     , n_members_(n_members)
@@ -1178,6 +1180,8 @@ DeepELMEnsembleExperiment::DeepELMEnsembleExperiment(
     , conv_k_per_member_(std::move(conv_k_per_member))
     , n_aug_views_(n_aug_views)
     , dataset_(std::move(dataset))
+    , conv_n_layers_(conv_n_layers)
+    , conv_max_pool2_(conv_max_pool2)
 {
     if (dataset_ == "cifar10") {
         c_in_ = 3; img_h_ = 32; img_w_ = 32; n_pixels_ = 3 * 32 * 32;
@@ -1260,7 +1264,8 @@ void DeepELMEnsembleExperiment::setup() {
                             ? 5 : conv_k_per_member_[static_cast<size_t>(m)];
             mem.conv_front = std::make_unique<ConvFrontend>(
                 conv_c_out_, /*max_pool=*/true, k_m,
-                c_in_, img_h_, img_w_);
+                c_in_, img_h_, img_w_,
+                conv_n_layers_, conv_max_pool2_);
             mem.d0 = mem.conv_front->output_features();
         } else {
             mem.d0 = d0_;
